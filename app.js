@@ -1259,9 +1259,19 @@ function isSameNisn(nisnA, nisnB) {
 // ----------------------------------------------------
 // PUSAT TINDAK LANJUT KEHADIRAN SISWA (INTERVENTION)
 // ----------------------------------------------------
-function getStudentParentContact(studentId) {
-  const student = (db.siswa || []).find(x => x.id === studentId);
-  if (!student) return null;
+function getStudentParentContact(studentOrId) {
+  const student = (typeof studentOrId === 'object' && studentOrId !== null)
+    ? studentOrId
+    : (db.siswa || []).find(x => x.id === studentOrId);
+  if (!student) return {
+    student: null,
+    namaWali: "Orang Tua / Wali",
+    hubungan: "Orang Tua",
+    noHp: "",
+    cleanPhone: "",
+    catatan: "",
+    hasPhone: false
+  };
   const userSchool = getCurrentSchoolName();
 
   // 1. Cari di db.kontakWali yang terisolasi sesuai sekolah
@@ -12149,10 +12159,17 @@ function renderDashboardGuruWali(container) {
   container.innerHTML = `
     <!-- Welcome Banner Guru Wali -->
     <div class="welcome-banner" style="background: linear-gradient(135deg, #7c3aed, #4f46e5); color: #fff;">
-      <h2><i class="fas fa-hand-holding-heart"></i> Dashboard Guru Wali (Mentor Asuhan)</h2>
-      <p>
-        Mendampingi perkembangan karakter, akhlak, disiplin kehadiran, dan motivasi belajar siswa asuhan Anda di SMA Negeri Saku secara personal.
-      </p>
+      <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 14px;">
+        <div style="max-width: 650px;">
+          <h2><i class="fas fa-hand-holding-heart"></i> Dashboard Guru Wali (Mentor Asuhan)</h2>
+          <p style="margin: 6px 0 0; opacity: 0.95;">
+            Mendampingi perkembangan karakter, akhlak, disiplin kehadiran, dan motivasi belajar siswa asuhan Anda di SMA Negeri Saku secara personal.
+          </p>
+        </div>
+        <button type="button" class="btn btn-secondary btn-sm" onclick="openPilihSiswaAsuhanModal()" style="background: rgba(255,255,255,0.22); color: #fff; border: 1px solid rgba(255,255,255,0.45); font-weight: 600; padding: 8px 14px; backdrop-filter: blur(8px);">
+          <i class="fas fa-user-plus"></i> Tambah Siswa Asuhan dari Database
+        </button>
+      </div>
     </div>
 
     <!-- Stats Grid -->
@@ -12277,9 +12294,9 @@ function renderDaftarSiswaAsuhanGuruWali(container) {
           </div>
         </div>
         <div style="display: flex; gap: 10px; flex-wrap: wrap;">
-          <a href="#tambah_siswa_asuhan" onclick="navigate('tambah_siswa_asuhan')" class="btn btn-primary" style="box-shadow: 0 2px 8px rgba(124, 58, 237, 0.3);">
-            <i class="fas fa-user-plus"></i> Tambah Siswa Asuhan Baru
-          </a>
+          <button type="button" onclick="openPilihSiswaAsuhanModal()" class="btn btn-primary" style="box-shadow: 0 2px 8px rgba(124, 58, 237, 0.3);">
+            <i class="fas fa-user-plus"></i> Tambah Siswa Asuhan dari Database
+          </button>
         </div>
       </div>
     </div>
@@ -12320,25 +12337,26 @@ function renderDaftarSiswaAsuhanGuruWali(container) {
                   <i class="fas fa-user-plus" style="font-size: 2.4rem; color: var(--text-muted); margin-bottom: 10px; display: block;"></i>
                   <h4 style="margin: 0 0 6px;">Belum Ada Siswa Asuhan</h4>
                   <p style="margin: 0 0 16px; font-size: 0.85rem; color: var(--text-muted);">
-                    Anda belum menambahkan siswa asuhan. Klik tombol di bawah untuk melihat daftar nama siswa yang dapat ditambahkan.
+                    Anda belum menambahkan siswa asuhan. Pilih siswa langsung dari database sekolah.
                   </p>
-                  <a href="#tambah_siswa_asuhan" onclick="navigate('tambah_siswa_asuhan')" class="btn btn-primary btn-sm">
-                    <i class="fas fa-user-plus"></i> Tambah Siswa Asuhan Sekarang
-                  </a>
+                  <button type="button" onclick="openPilihSiswaAsuhanModal()" class="btn btn-primary btn-sm">
+                    <i class="fas fa-user-plus"></i> Tambah Siswa Asuhan dari Database Sekarang
+                  </button>
                 </td>
               </tr>
             ` : asuhanList.map((s, idx) => {
               const kelas = db.kelas.find(k => k.id === s.kelasId) || { nama: "-" };
               const contact = getStudentParentContact(s);
               const bimbinganCount = (db.jurnalBimbingan || []).filter(j => j.siswaId === s.id).length;
+              const gender = s.jenisKelamin || s.gender || "-";
 
               return `
-                <tr class="daftar-asuhan-row" data-kelas="${s.kelasId}" data-search="${s.nama.toLowerCase()} ${(s.nisn || '').toLowerCase()}">
+                <tr class="daftar-asuhan-row" data-kelas="${s.kelasId}" data-search="${(s.nama || '').toLowerCase()} ${(s.nisn || '').toLowerCase()}">
                   <td style="text-align: center;">${idx + 1}</td>
                   <td><span class="badge" style="background:var(--bg-app); border:1px solid var(--border-color); font-weight:600;">${kelas.nama}</span></td>
                   <td><code>${s.nisn || '-'}</code></td>
                   <td style="font-weight: 600;">${s.nama}</td>
-                  <td style="text-align: center;">${s.jenisKelamin || '-'}</td>
+                  <td style="text-align: center;">${gender}</td>
                   <td>${contact.namaWali}</td>
                   <td>
                     ${contact.hasPhone ? `
@@ -12429,6 +12447,9 @@ function renderTambahSiswaAsuhanGuruWali(container) {
           </div>
         </div>
         <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+          <button type="button" class="btn btn-secondary btn-sm" onclick="openPilihSiswaAsuhanModal()">
+            <i class="fas fa-window-restore"></i> Buka Modal Dialog
+          </button>
           <button type="button" class="btn btn-secondary btn-sm" onclick="toggleSelectAllTambahAsuhan(true)">
             Pilih Semua
           </button>
@@ -12503,9 +12524,10 @@ function renderTambahSiswaAsuhanGuruWali(container) {
               const kelas = db.kelas.find(k => k.id === s.kelasId) || { nama: "-" };
               const contact = getStudentParentContact(s);
               const isAsuhan = (db.siswaAsuhan || []).includes(s.id);
+              const gender = s.jenisKelamin || s.gender || "-";
 
               return `
-                <tr class="tambah-asuhan-row" data-kelas="${s.kelasId}" data-status="${isAsuhan ? 'ALREADY' : 'AVAILABLE'}" data-search="${s.nama.toLowerCase()} ${(s.nisn || '').toLowerCase()}">
+                <tr class="tambah-asuhan-row" data-kelas="${s.kelasId}" data-status="${isAsuhan ? 'ALREADY' : 'AVAILABLE'}" data-search="${(s.nama || '').toLowerCase()} ${(s.nisn || '').toLowerCase()}">
                   <td style="text-align: center;">
                     ${!isAsuhan ? `
                       <input type="checkbox" class="tambah-asuhan-checkbox" data-siswa-id="${s.id}" onchange="updateTercentangInfoBadge()">
@@ -12517,7 +12539,7 @@ function renderTambahSiswaAsuhanGuruWali(container) {
                   <td><span class="badge" style="background:var(--bg-app); border:1px solid var(--border-color); font-weight:600;">${kelas.nama}</span></td>
                   <td><code>${s.nisn || '-'}</code></td>
                   <td style="font-weight: 600;">${s.nama}</td>
-                  <td style="text-align: center;">${s.jenisKelamin || '-'}</td>
+                  <td style="text-align: center;">${gender}</td>
                   <td>
                     <div style="font-size: 0.82rem;">${contact.namaWali}</div>
                     <div style="font-size: 0.76rem; color: var(--text-muted);">${contact.noHp || '-'}</div>
@@ -12645,6 +12667,261 @@ function tambahkanSiswaTercentang() {
   saveDatabase(true);
   showToast(`${addedCount} Siswa berhasil ditambahkan ke daftar asuhan!`);
   renderPage("siswa_asuhan");
+}
+
+// ==========================================
+// MODAL PILIH SISWA ASUHAN DARI DATABASE
+// ==========================================
+function openPilihSiswaAsuhanModal() {
+  db.siswaAsuhan = db.siswaAsuhan || [];
+  const allSiswa = db.siswa || [];
+
+  if (allSiswa.length === 0) {
+    alert("Database siswa masih kosong. Silakan tambahkan atau import data siswa terlebih dahulu di menu Data Siswa atau Sinkronisasi.");
+    return;
+  }
+
+  const kelasList = db.kelas || [];
+  const kelasOptions = [
+    '<option value="ALL">Semua Kelas</option>',
+    ...kelasList.map(k => `<option value="${k.id}">${k.tingkat ? k.tingkat + ' - ' : ''}${k.nama}</option>`)
+  ].join('');
+
+  const modalHtml = `
+    <div style="font-size: 0.88rem;">
+      <p style="font-size: 0.82rem; color: var(--text-muted); margin: 0 0 12px;">
+        Pilih siswa dari database sekolah untuk dijadikan anak bimbingan/mentee Anda. Anda dapat menyaring per kelas, mencari berdasarkan nama / NISN, atau mencentang beberapa siswa sekaligus.
+      </p>
+
+      <!-- Filter Bar -->
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px;">
+        <div>
+          <label style="font-size: 0.74rem; font-weight: 700; color: var(--text-muted); display: block; margin-bottom: 4px;">FILTER KELAS:</label>
+          <select id="modal-asuhan-filter-kelas" class="form-control" style="font-size: 0.82rem; padding: 6px 10px;" onchange="filterModalSiswaAsuhan()">
+            ${kelasOptions}
+          </select>
+        </div>
+        <div>
+          <label style="font-size: 0.74rem; font-weight: 700; color: var(--text-muted); display: block; margin-bottom: 4px;">STATUS ASUHAN:</label>
+          <select id="modal-asuhan-filter-status" class="form-control" style="font-size: 0.82rem; padding: 6px 10px;" onchange="filterModalSiswaAsuhan()">
+            <option value="AVAILABLE" selected>Belum Jadi Asuhan (Tersedia)</option>
+            <option value="ALL">Semua Siswa</option>
+            <option value="ALREADY">Sudah Jadi Asuhan</option>
+          </select>
+        </div>
+      </div>
+
+      <div style="margin-bottom: 12px; position: relative;">
+        <input type="text" id="modal-asuhan-search" class="form-control" placeholder="Ketik nama siswa atau NISN..." style="font-size: 0.85rem; padding-left: 34px;" oninput="filterModalSiswaAsuhan()">
+        <i class="fas fa-search" style="position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--text-muted); font-size: 0.85rem;"></i>
+      </div>
+
+      <!-- Quick Action Bar -->
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; flex-wrap: wrap; gap: 8px;">
+        <div style="display: flex; gap: 6px;">
+          <button type="button" class="btn btn-secondary btn-sm" style="font-size: 0.75rem; padding: 4px 8px;" onclick="toggleSelectAllModalAsuhan(true)">Pilih Semua (Terlihat)</button>
+          <button type="button" class="btn btn-secondary btn-sm" style="font-size: 0.75rem; padding: 4px 8px;" onclick="toggleSelectAllModalAsuhan(false)">Batal Centang</button>
+        </div>
+        <span id="modal-asuhan-checked-count" class="badge" style="background: rgba(124,58,237,0.12); color: #7c3aed; font-size: 0.78rem; font-weight: 700; padding: 4px 10px;">
+          0 Siswa Tercentang
+        </span>
+      </div>
+
+      <!-- Student List Table -->
+      <div style="max-height: 360px; overflow-y: auto; border: 1px solid var(--border-color); border-radius: 8px;">
+        <table class="table" id="modal-asuhan-table" style="width: 100%; margin: 0; font-size: 0.82rem;">
+          <thead style="position: sticky; top: 0; background: var(--bg-card); z-index: 2; box-shadow: 0 1px 2px rgba(0,0,0,0.05);">
+            <tr>
+              <th style="width: 38px; text-align: center;">Pilih</th>
+              <th>Nama Siswa</th>
+              <th>Kelas</th>
+              <th>NISN</th>
+              <th style="text-align: center; width: 40px;">L/P</th>
+              <th style="text-align: center; width: 105px;">Aksi Cepat</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${allSiswa.map((s, idx) => {
+              const k = kelasList.find(c => c.id === s.kelasId) || { nama: "-" };
+              const isAsuhan = db.siswaAsuhan.includes(s.id);
+              const gender = s.jenisKelamin || s.gender || "-";
+              return `
+                <tr class="modal-asuhan-row" id="modal-row-${s.id}" data-siswa-id="${s.id}" data-kelas="${s.kelasId}" data-status="${isAsuhan ? 'ALREADY' : 'AVAILABLE'}" data-search="${(s.nama || '').toLowerCase()} ${(s.nisn || '').toLowerCase()}">
+                  <td style="text-align: center;">
+                    ${!isAsuhan ? `
+                      <input type="checkbox" class="modal-asuhan-cb" data-siswa-id="${s.id}" onchange="updateModalAsuhanCheckedCount()">
+                    ` : `
+                      <i class="fas fa-check-circle" style="color: #10b981;" title="Sudah jadi asuhan"></i>
+                    `}
+                  </td>
+                  <td>
+                    <div style="font-weight: 600; color: var(--text-main);">${s.nama}</div>
+                    <div id="modal-badge-${s.id}">
+                      ${isAsuhan ? `<span class="badge badge-hadir" style="font-size: 0.68rem; padding: 2px 6px;"><i class="fas fa-check"></i> Asuhan Aktif</span>` : ''}
+                    </div>
+                  </td>
+                  <td><span class="badge" style="background: var(--bg-app); border: 1px solid var(--border-color); font-size: 0.74rem;">${k.nama}</span></td>
+                  <td><code>${s.nisn || '-'}</code></td>
+                  <td style="text-align: center;"><span class="badge" style="background: rgba(0,0,0,0.04); font-size: 0.72rem;">${gender}</span></td>
+                  <td style="text-align: center;" id="modal-action-${s.id}">
+                    ${!isAsuhan ? `
+                      <button type="button" class="btn btn-primary btn-sm" style="font-size: 0.74rem; padding: 4px 8px; width: 100%; justify-content: center;" onclick="tambahSiswaAsuhanFromModal('${s.id}')">
+                        <i class="fas fa-plus"></i> Tambah
+                      </button>
+                    ` : `
+                      <button type="button" class="btn btn-secondary btn-sm" style="color: #ef4444; font-size: 0.72rem; padding: 3px 6px; width: 100%; justify-content: center;" onclick="hapusSiswaAsuhanFromModal('${s.id}')" title="Keluarkan">
+                        <i class="fas fa-minus"></i> Hapus
+                      </button>
+                    `}
+                  </td>
+                </tr>
+              `;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+
+  const footerHtml = `
+    <button type="button" class="btn btn-secondary" onclick="closeModal()">Tutup</button>
+    <button type="button" class="btn btn-primary" onclick="simpanPilihanSiswaAsuhanModal()">
+      <i class="fas fa-user-plus"></i> Tambahkan Siswa Tercentang
+    </button>
+  `;
+
+  openModal("Pilih Siswa Asuhan dari Database", modalHtml, footerHtml, true);
+
+  setTimeout(() => {
+    filterModalSiswaAsuhan();
+  }, 20);
+}
+
+function filterModalSiswaAsuhan() {
+  const selectedKelas = document.getElementById("modal-asuhan-filter-kelas")?.value || "ALL";
+  const selectedStatus = document.getElementById("modal-asuhan-filter-status")?.value || "ALL";
+  const query = (document.getElementById("modal-asuhan-search")?.value || "").toLowerCase().trim();
+  const rows = document.querySelectorAll("#modal-asuhan-table tbody tr.modal-asuhan-row");
+
+  rows.forEach(row => {
+    const rowKelas = row.getAttribute("data-kelas");
+    const rowStatus = row.getAttribute("data-status");
+    const rowSearch = row.getAttribute("data-search") || "";
+
+    const matchKelas = selectedKelas === "ALL" || rowKelas === selectedKelas;
+    const matchStatus = selectedStatus === "ALL" || rowStatus === selectedStatus;
+    const matchSearch = rowSearch.includes(query);
+
+    row.style.display = (matchKelas && matchStatus && matchSearch) ? "" : "none";
+  });
+
+  updateModalAsuhanCheckedCount();
+}
+
+function updateModalAsuhanCheckedCount() {
+  const checked = document.querySelectorAll(".modal-asuhan-cb:checked");
+  const badge = document.getElementById("modal-asuhan-checked-count");
+  if (badge) {
+    badge.textContent = `${checked.length} Siswa Tercentang`;
+  }
+}
+
+function toggleSelectAllModalAsuhan(selectAll) {
+  const rows = document.querySelectorAll("#modal-asuhan-table tbody tr.modal-asuhan-row");
+  rows.forEach(row => {
+    if (row.style.display !== "none") {
+      const cb = row.querySelector(".modal-asuhan-cb");
+      if (cb) cb.checked = selectAll;
+    }
+  });
+  updateModalAsuhanCheckedCount();
+}
+
+function tambahSiswaAsuhanFromModal(siswaId) {
+  db.siswaAsuhan = db.siswaAsuhan || [];
+  if (!db.siswaAsuhan.includes(siswaId)) {
+    db.siswaAsuhan.push(siswaId);
+    saveDatabase(true);
+  }
+  const student = (db.siswa || []).find(s => s.id === siswaId);
+  showToast(`${student ? student.nama : 'Siswa'} ditambahkan sebagai anak asuhan!`);
+
+  // Update UI row in modal
+  const row = document.getElementById(`modal-row-${siswaId}`);
+  if (row) {
+    row.setAttribute("data-status", "ALREADY");
+    const firstTd = row.querySelector("td:first-child");
+    if (firstTd) firstTd.innerHTML = `<i class="fas fa-check-circle" style="color: #10b981;" title="Sudah jadi asuhan"></i>`;
+    const badgeDiv = document.getElementById(`modal-badge-${siswaId}`);
+    if (badgeDiv) badgeDiv.innerHTML = `<span class="badge badge-hadir" style="font-size: 0.68rem; padding: 2px 6px;"><i class="fas fa-check"></i> Asuhan Aktif</span>`;
+    const actionTd = document.getElementById(`modal-action-${siswaId}`);
+    if (actionTd) {
+      actionTd.innerHTML = `
+        <button type="button" class="btn btn-secondary btn-sm" style="color: #ef4444; font-size: 0.72rem; padding: 3px 6px; width: 100%; justify-content: center;" onclick="hapusSiswaAsuhanFromModal('${siswaId}')" title="Keluarkan">
+          <i class="fas fa-minus"></i> Hapus
+        </button>
+      `;
+    }
+  }
+
+  updateModalAsuhanCheckedCount();
+  // Refresh background page view
+  const activePage = window.location.hash.substring(1) || "siswa_asuhan";
+  renderPage(activePage);
+}
+
+function hapusSiswaAsuhanFromModal(siswaId) {
+  db.siswaAsuhan = (db.siswaAsuhan || []).filter(id => id !== siswaId);
+  saveDatabase(true);
+  const student = (db.siswa || []).find(s => s.id === siswaId);
+  showToast(`${student ? student.nama : 'Siswa'} dikeluarkan dari asuhan.`);
+
+  // Update UI row in modal
+  const row = document.getElementById(`modal-row-${siswaId}`);
+  if (row) {
+    row.setAttribute("data-status", "AVAILABLE");
+    const firstTd = row.querySelector("td:first-child");
+    if (firstTd) firstTd.innerHTML = `<input type="checkbox" class="modal-asuhan-cb" data-siswa-id="${siswaId}" onchange="updateModalAsuhanCheckedCount()">`;
+    const badgeDiv = document.getElementById(`modal-badge-${siswaId}`);
+    if (badgeDiv) badgeDiv.innerHTML = "";
+    const actionTd = document.getElementById(`modal-action-${siswaId}`);
+    if (actionTd) {
+      actionTd.innerHTML = `
+        <button type="button" class="btn btn-primary btn-sm" style="font-size: 0.74rem; padding: 4px 8px; width: 100%; justify-content: center;" onclick="tambahSiswaAsuhanFromModal('${siswaId}')">
+          <i class="fas fa-plus"></i> Tambah
+        </button>
+      `;
+    }
+  }
+
+  updateModalAsuhanCheckedCount();
+  // Refresh background page view
+  const activePage = window.location.hash.substring(1) || "siswa_asuhan";
+  renderPage(activePage);
+}
+
+function simpanPilihanSiswaAsuhanModal() {
+  const checkboxes = document.querySelectorAll(".modal-asuhan-cb:checked");
+  if (checkboxes.length === 0) {
+    alert("Silakan centang minimal satu siswa yang ingin ditambahkan ke daftar asuhan.");
+    return;
+  }
+
+  db.siswaAsuhan = db.siswaAsuhan || [];
+  let count = 0;
+  checkboxes.forEach(cb => {
+    const id = cb.getAttribute("data-siswa-id");
+    if (id && !db.siswaAsuhan.includes(id)) {
+      db.siswaAsuhan.push(id);
+      count++;
+    }
+  });
+
+  saveDatabase(true);
+  closeModal();
+  showToast(`${count} Siswa berhasil ditambahkan ke daftar asuhan!`);
+  const activePage = window.location.hash.substring(1) || "siswa_asuhan";
+  renderPage(activePage);
 }
 
 function renderSiswaAsuhanGuruWali(container) {
