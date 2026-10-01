@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="id" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Sman_Saku - Aplikasi Administrasi Guru</title>
+  <!-- SEO Meta Tags -->
+  <meta name="description" content="Sman_Saku - Aplikasi administrasi guru terpadu dalam satu genggaman. Kelola kelas, siswa, jadwal, absensi, nilai, dan jurnal mengajar.">
+  <meta name="author" content="Sman_Saku">
+  
+  <!-- FontAwesome Icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  
+  <!-- Progressive Web App (PWA) & Mobile Meta -->
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#2563eb">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Sman_Saku">
+  <link rel="apple-touch-icon" href="assets/icon-192.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="assets/icon-192.png">
+
+  <!-- Custom Stylesheet -->
+  <link rel="stylesheet" href="style.css?v=1.1.7">
+</head>
+<body>
+
+  <!-- =============================== -->
+  <!-- LOGIN SCREEN OVERLAY -->
+  <!-- =============================== -->
+  <div id="login-screen" class="login-screen">
+    <!-- Ambient Glowing Background Blobs -->
+    <div class="login-bg-decorations">
+      <div class="login-blob login-blob-1"></div>
+      <div class="login-blob login-blob-2"></div>
+      <div class="login-blob login-blob-3"></div>
+    </div>
+    
+    <div class="login-container">
+      <div class="login-card">
+        <div class="login-header">
+          <div class="login-icon">
+            <i class="fas fa-graduation-cap"></i>
+          </div>
+          <h1>Sman<span>_Saku</span></h1>
+          <p>Aplikasi Administrasi Guru Terpadu</p>
+        </div>
+        
+        <form id="login-form" onsubmit="handleLogin(event)">
+          <div class="login-form-group">
+            <label for="login-email"><i class="fas fa-envelope"></i> Email Terdaftar</label>
+            <input type="email" id="login-email" class="login-input" placeholder="Masukkan email terdaftar..." required autocomplete="email">
+          </div>
+          <div class="login-form-group">
+            <label for="login-password"><i class="fas fa-lock"></i> Password</label>
+            <div style="position:relative;">
+              <input type="password" id="login-password" class="login-input" placeholder="Masukkan password..." required autocomplete="current-password">
+              <button type="button" class="login-eye-btn" onclick="togglePasswordVisibility()">
+                <i class="fas fa-eye" id="password-eye-icon"></i>
+              </button>
+            </div>
+          </div>
+          
+          <div id="login-error" class="login-error" style="display:none;">
+            <i class="fas fa-exclamation-circle"></i>
+            <span id="login-error-msg">Email tidak terdaftar.</span>
+          </div>
+
+          <button type="submit" class="login-btn" id="login-submit-btn">
+            <i class="fas fa-sign-in-alt"></i> Masuk ke Aplikasi
+          </button>
+        </form>
+
+        <!-- WhatsApp Admin Registration Box -->
+        <div class="login-wa-container">
+          <p class="login-wa-title"><i class="fas fa-user-plus"></i> Belum punya akun? Hubungi Admin untuk pendaftaran:</p>
+          <a href="https://wa.me/6285824541337?text=Halo%20Admin,%20saya%20ingin%20mendaftar%20akun%20Sman_Saku" target="_blank" rel="noopener noreferrer" class="login-wa-btn">
+            <i class="fab fa-whatsapp"></i> Hubungi WA Admin (085824541337)
+          </a>
+        </div>
+
+        <div class="login-footer">
+          <p><i class="fas fa-shield-alt"></i> Sistem Akses Terproteksi — Hanya untuk Guru & Administrator.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Sidebar -->
+  <aside id="app-sidebar">
+    <div class="sidebar-brand">
+      <i class="fas fa-graduation-cap"></i>
+      <h2>Sman_Saku</h2>
+    </div>
+    <ul class="sidebar-menu" id="sidebar-menu-list">
+      <li data-page="dashboard" class="active">
+        <a href="#dashboard" onclick="navigate('dashboard')">
+          <i class="fas fa-chart-pie"></i>
+          <span>Dashboard</span>
+        </a>
+      </li>
+      <li data-page="kelas">
+        <a href="#kelas" onclick="navigate('kelas')">
+          <i class="fas fa-school"></i>
+          <span>Data Kelas</span>
+        </a>
+      </li>
+      <li data-page="siswa">
+        <a href="#siswa" onclick="navigate('siswa')">
+          <i class="fas fa-user-graduate"></i>
+          <span>Data Siswa</span>
+        </a>
+      </li>
+      <li data-page="kontak">
+        <a href="#kontak" onclick="navigate('kontak')">
+          <i class="fas fa-address-book"></i>
+          <span>Kontak Wali</span>
+        </a>
+      </li>
+      <li data-page="jadwal">
+        <a href="#jadwal" onclick="navigate('jadwal')">
+          <i class="fas fa-calendar-alt"></i>
+          <span>Jadwal Mengajar</span>
+        </a>
+      </li>
+      <li data-page="absensi">
+        <a href="#absensi" onclick="navigate('absensi')">
+          <i class="fas fa-clipboard-user"></i>
+          <span>Absensi Siswa</span>
+        </a>
+      </li>
+      <li data-page="nilai">
+        <a href="#nilai" onclick="navigate('nilai')">
+          <i class="fas fa-award"></i>
+          <span>Nilai Siswa</span>
+        </a>
+      </li>
+      <li data-page="jurnal">
+        <a href="#jurnal" onclick="navigate('jurnal')">
+          <i class="fas fa-book-open"></i>
+          <span>Jurnal Mengajar</span>
+        </a>
+      </li>
+      <li data-page="rekap">
+        <a href="#rekap" onclick="navigate('rekap')">
+          <i class="fas fa-print"></i>
+          <span>Rekap & Cetak</span>
+        </a>
+      </li>
+      <li data-page="profil">
+        <a href="#profil" onclick="navigate('profil')">
+          <i class="fas fa-user-cog"></i>
+          <span>Profil</span>
+        </a>
+      </li>
+    </ul>
+    <div class="sidebar-footer">
+      <p>&copy; 2026 Sman_Saku</p>
+      <p style="font-size: 0.7rem; margin-top: 4px;">v1.0.0</p>
+    </div>
+  </aside>
+
+  <!-- Main Content Wrapper -->
+  <main>
+    <header class="no-print">
+      <div style="display: flex; align-items: center; gap: 12px;">
+        <button id="menu-toggle-btn" class="btn-menu-toggle" onclick="toggleSidebar()">
+          <i class="fas fa-bars"></i>
+        </button>
+        <div class="page-title">
+          <h1 id="view-title">Dashboard</h1>
+          <p id="view-subtitle">Ringkasan aktivitas dan administrasi Anda hari ini.</p>
+        </div>
+      </div>
+      
+      <div class="header-actions">
+        <!-- Mode Switcher (Guru Mapel / Wali Kelas / Guru Wali) -->
+        <div class="mode-switcher-container" id="mode-switcher-container">
+          <button type="button" id="btn-switch-mode" class="btn-mode-switcher mode-mapel" onclick="toggleModeDropdown(event)" title="Ganti Mode / Peran Kerja">
+            <span class="mode-icon-circle" id="mode-icon-circle">
+              <i class="fas fa-chalkboard-user" id="mode-icon"></i>
+            </span>
+            <div class="mode-text-group">
+              <span class="mode-prefix">Mode:</span>
+              <span class="mode-active-title" id="mode-active-title">Guru Mapel</span>
+            </div>
+            <i class="fas fa-chevron-down mode-arrow"></i>
+          </button>
+          
+          <!-- Dropdown Menu -->
+          <div id="mode-dropdown-menu" class="mode-dropdown-menu" style="display:none;">
+            <div class="mode-dropdown-header">
+              <i class="fas fa-user-gear"></i> Pilih Mode Kerja:
+            </div>
+            <button type="button" class="mode-dropdown-item active" data-mode="mapel" onclick="setAppMode('mapel')">
+              <div class="item-icon-box mapel">
+                <i class="fas fa-chalkboard-user"></i>
+              </div>
+              <div class="item-content">
+                <div class="item-title-row">
+                  <span class="item-title">Mode Guru Mapel</span>
+                  <span class="item-badge mapel">Aktif</span>
+                </div>
+                <div class="item-desc">Isi absensi mapel, input nilai siswa, dan jurnal mengajar kelas yang diampu.</div>
+              </div>
+            </button>
+            <button type="button" class="mode-dropdown-item" data-mode="walikelas" onclick="setAppMode('walikelas')">
+              <div class="item-icon-box walikelas">
+                <i class="fas fa-user-tie"></i>
+              </div>
+              <div class="item-content">
+                <div class="item-title-row">
+                  <span class="item-title">Mode Wali Kelas</span>
+                  <span class="item-badge walikelas">Kelas Binaan</span>
+                </div>
+                <div class="item-desc">Rekap final presensi, radar siswa bermasalah (alpa/bolos), dan komunikasi wali murid.</div>
+              </div>
+            </button>
+            <button type="button" class="mode-dropdown-item" data-mode="guruwali" onclick="setAppMode('guruwali')">
+              <div class="item-icon-box guruwali">
+                <i class="fas fa-hand-holding-heart"></i>
+              </div>
+              <div class="item-content">
+                <div class="item-title-row">
+                  <span class="item-title">Mode Guru Wali</span>
+                  <span class="item-badge guruwali">Mentor Asuhan</span>
+                </div>
+                <div class="item-desc">Pendampingan siswa asuhan lintas kelas, catatan bimbingan konseling & karakter.</div>
+              </div>
+            </button>
+          </div>
+        </div>
+
+        <!-- Cloud Sync Status Button -->
+        <button id="btn-cloud-sync" class="btn-cloud-sync" onclick="syncWithCloud(true)" title="Sinkronisasi Cloud (Web & Android)">
+          <i class="fas fa-cloud" id="cloud-sync-icon"></i>
+          <span id="cloud-sync-text" class="cloud-sync-label">Cloud</span>
+        </button>
+
+        <!-- Install PWA Button (Hidden by default, shown when installable) -->
+        <button id="btn-pwa-install" class="btn-pwa-install" style="display:none;" onclick="triggerPwaInstall()" title="Pasang Aplikasi Sman_Saku di HP">
+          <i class="fas fa-mobile-screen-button"></i>
+          <span class="pwa-install-label">Pasang App</span>
+        </button>
+
+        <!-- Theme Toggle Button -->
+        <button class="btn-theme-toggle" onclick="toggleTheme()" title="Ganti Tema">
+          <i class="fas fa-moon" id="theme-icon"></i>
+        </button>
+        
+        <!-- Profile Card -->
+        <div class="profile-card">
+          <div class="profile-avatar" id="header-avatar">BS</div>
+          <div class="profile-info">
+            <div class="profile-name" id="header-guru-name">Budi Santoso, S.Pd.</div>
+            <div class="profile-role" id="header-guru-nip">NIP: 198503112010011003</div>
+          </div>
+        </div>
+
+        <!-- Logout Button -->
+        <button class="btn-logout" onclick="handleLogout()" title="Keluar">
+          <i class="fas fa-sign-out-alt"></i>
+        </button>
+      </div>
+    </header>
+
+    <!-- Dynamic Content Section -->
+    <section id="content-container">
+      <!-- Content injected by JavaScript -->
+    </section>
+  </main>
+
+  <!-- Reusable Modal Window -->
+  <div id="app-modal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 class="modal-title" id="modal-title">Form Input</h3>
+        <button class="modal-close" onclick="closeModal()">&times;</button>
+      </div>
+      <div class="modal-body" id="modal-body">
+        <!-- Injected dynamic form -->
+      </div>
+      <div class="modal-footer" id="modal-footer">
+        <!-- Buttons injected dynamically -->
+      </div>
+    </div>
+  </div>
+
+  <!-- Notification Popup Toast -->
+  <div id="toast" style="display:none; position:fixed; bottom:20px; right:20px; background-color:var(--accent); color:var(--text-light); padding:12px 24px; border-radius:10px; box-shadow:var(--shadow-lg); z-index:9999; font-weight:600; font-size:0.9rem; align-items:center; gap:8px;">
+    <i class="fas fa-circle-check" style="color:var(--hadir);"></i>
+    <span id="toast-message">Pesan sukses!</span>
+  </div>
+
+  <!-- Load Scripts -->
+  <script src="data-seed.js?v=1.1.7"></script>
+  <script src="app.js?v=1.1.7"></script>
+</body>
+</html>

@@ -1,0 +1,23 @@
+{
+  "name": "sman-saku",
+  "version": "1.0.0",
+  "description": "Aplikasi Administrasi Guru Terpadu",
+  "main": "index.html",
+  "scripts": {
+    "dev": "npx http-server -p 8080 -c-1",
+    "build:www": "node build-www.js",
+    "sync:android": "node build-www.js && npx cap sync android",
+    "build:apk": "node build-apk.js",
+    "open:android": "npx cap open android"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@capacitor/core": "^8.5.2"
+  },
+  "devDependencies": {
+    "@capacitor/android": "^8.5.2",
+    "@capacitor/cli": "^8.5.2"
+  }
+}
