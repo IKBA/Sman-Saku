@@ -4,7 +4,7 @@
   "description": "Aplikasi Administrasi Guru Terpadu",
   "main": "index.html",
   "scripts": {
-    "dev": "npx http-server -p 8080 -c-1",
+    "dev": "node server.js",
     "build:www": "node build-www.js",
     "sync:android": "node build-www.js && npx cap sync android",
     "build:apk": "node build-apk.js",

@@ -605,6 +605,14 @@
   padding: 0;
 }
 
+html {
+  -webkit-text-size-adjust: 100%;
+  -moz-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
 html, body {
   width: 100%;
   max-width: 100vw;
@@ -981,6 +989,12 @@ header {
   display: flex;
   align-items: center;
   gap: 16px;
+}
+
+.header-tools-group {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 
 .btn-cloud-sync, .btn-pwa-install {
@@ -1905,9 +1919,19 @@ tr:hover td {
 }
 
 @media (max-width: 768px) {
+  html {
+    font-size: 14px !important;
+  }
+
+  body {
+    font-size: 0.88rem;
+    -webkit-text-size-adjust: 100% !important;
+    text-size-adjust: 100% !important;
+  }
+
   aside {
     width: 100%;
-    height: calc(64px + var(--safe-bottom));
+    height: calc(60px + var(--safe-bottom));
     padding-bottom: var(--safe-bottom);
     position: fixed;
     bottom: 0;
@@ -1915,7 +1939,7 @@ tr:hover td {
     left: 0;
     flex-direction: row;
     z-index: 1000;
-    box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.15);
+    box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.15);
     background-color: var(--bg-sidebar);
     backdrop-filter: blur(16px);
     -webkit-backdrop-filter: blur(16px);
@@ -1933,7 +1957,7 @@ tr:hover td {
 
   .sidebar-menu {
     flex-direction: row;
-    padding: 0 8px;
+    padding: 0 4px;
     margin: 0;
     width: 100%;
     height: 100%;
@@ -1957,20 +1981,21 @@ tr:hover td {
 
   .sidebar-menu li {
     flex: 1 0 auto;
-    min-width: 66px;
+    min-width: 60px;
     height: 100%;
     display: flex;
     align-items: center;
     justify-content: center;
+    padding: 0 2px;
   }
 
   .sidebar-menu li a {
     flex-direction: column;
     justify-content: center;
     align-items: center;
-    gap: 3px;
-    padding: 4px 2px;
-    font-size: 0.65rem;
+    gap: 2px;
+    padding: 3px 2px;
+    font-size: 0.60rem;
     height: 100%;
     width: 100%;
     border-radius: 0;
@@ -1988,22 +2013,25 @@ tr:hover td {
     background-color: rgba(255, 255, 255, 0.08);
     color: #fff;
     box-shadow: none;
-    border-bottom: 3px solid #f8f9fa;
+    border-bottom: 2.5px solid #f8f9fa;
     font-weight: 600;
   }
 
   .sidebar-menu li a i {
-    font-size: 1.15rem;
+    font-size: 1.05rem;
     margin: 0;
     width: auto;
   }
 
   .sidebar-menu li a span {
     display: block;
-    white-space: nowrap;
-    text-overflow: ellipsis;
+    white-space: normal !important;
+    word-break: break-word !important;
+    text-align: center;
+    line-height: 1.1;
+    max-width: 62px;
+    font-size: 0.58rem !important;
     overflow: hidden;
-    max-width: 64px;
   }
 
   main {
@@ -2011,8 +2039,8 @@ tr:hover td {
     width: 100%;
     max-width: 100vw;
     box-sizing: border-box;
-    padding: 12px 14px calc(80px + var(--safe-bottom)) 14px !important;
-    padding-top: calc(14px + var(--safe-top)) !important;
+    padding: 10px 12px calc(72px + var(--safe-bottom)) 12px !important;
+    padding-top: calc(10px + var(--safe-top)) !important;
     overflow-x: hidden;
   }
 
@@ -2022,32 +2050,54 @@ tr:hover td {
 
   /* Header on Mobile */
   header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 8px;
-    margin-bottom: 16px;
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 8px !important;
+    margin-bottom: 12px !important;
+    width: 100% !important;
+  }
+
+  .header-title-wrapper {
+    width: 100% !important;
+    display: flex !important;
+    align-items: center !important;
+    gap: 10px !important;
   }
 
   .page-title {
-    flex: 1 1 auto;
-    min-width: 120px;
+    flex: 1 1 100% !important;
+    min-width: 0 !important;
+    width: 100% !important;
   }
 
   .page-title h1 {
-    font-size: 1.3rem;
+    font-size: 1.15rem !important;
+    line-height: 1.25 !important;
+    word-break: break-word !important;
   }
 
   .page-title p {
-    font-size: 0.76rem;
-    line-height: 1.2;
-    margin-top: 2px;
+    font-size: 0.72rem !important;
+    line-height: 1.25 !important;
+    margin-top: 2px !important;
+    word-break: break-word !important;
   }
 
   .header-actions {
-    gap: 6px;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    width: 100% !important;
+    gap: 6px !important;
     flex-shrink: 0;
+    margin-top: 2px !important;
+  }
+
+  .header-tools-group {
+    display: flex !important;
+    align-items: center !important;
+    gap: 5px !important;
   }
 
   .profile-info {
@@ -2055,23 +2105,24 @@ tr:hover td {
   }
 
   .profile-card {
-    padding: 3px !important;
+    padding: 2px !important;
     border-radius: 50% !important;
     border: 1px solid var(--border-color);
   }
 
   .profile-avatar {
-    width: 34px !important;
-    height: 34px !important;
-    font-size: 0.85rem !important;
+    width: 32px !important;
+    height: 32px !important;
+    font-size: 0.8rem !important;
   }
 
   .btn-cloud-sync, .btn-pwa-install, .btn-theme-toggle, .btn-logout {
-    width: 36px !important;
-    height: 36px !important;
+    width: 32px !important;
+    height: 32px !important;
     padding: 0 !important;
     justify-content: center !important;
     border-radius: 50% !important;
+    font-size: 0.85rem !important;
   }
 
   .cloud-sync-label, .pwa-install-label {
@@ -2079,56 +2130,117 @@ tr:hover td {
   }
 
   .btn-mode-switcher {
-    padding: 4px 8px !important;
-    gap: 5px !important;
+    padding: 4px 10px !important;
+    gap: 6px !important;
+  }
+  .mode-icon-circle {
+    width: 22px !important;
+    height: 22px !important;
+    font-size: 0.7rem !important;
   }
   .mode-prefix {
     display: none !important;
   }
   .mode-active-title {
-    font-size: 0.72rem !important;
+    font-size: 0.75rem !important;
+    font-weight: 700 !important;
   }
   .mode-dropdown-menu {
-    width: 290px !important;
-    right: -70px !important;
+    position: fixed !important;
+    top: 56px !important;
+    left: 12px !important;
+    right: 12px !important;
+    width: auto !important;
+    max-width: 350px !important;
+    margin: 0 auto !important;
+    font-size: 0.8rem !important;
+    z-index: 9999 !important;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3) !important;
+    background: var(--bg-card) !important;
+    border: 1px solid var(--border-color) !important;
+    border-radius: 14px !important;
+    padding: 8px !important;
+  }
+  .mode-dropdown-item {
+    padding: 8px 10px !important;
+    font-size: 0.78rem !important;
+    white-space: normal !important;
+  }
+  .mode-dropdown-item .item-title {
+    font-size: 0.82rem !important;
+  }
+  .mode-dropdown-item .item-badge {
+    font-size: 0.62rem !important;
+    flex-shrink: 0 !important;
+  }
+  .mode-dropdown-item .item-desc {
+    font-size: 0.70rem !important;
+    line-height: 1.3 !important;
+    white-space: normal !important;
+  }
+
+  /* Welcome Banner on Mobile */
+  .welcome-banner {
+    padding: 14px 12px !important;
+    border-radius: 12px !important;
+    margin-bottom: 12px !important;
+  }
+  .welcome-banner h2 {
+    font-size: 1.12rem !important;
+    line-height: 1.25 !important;
+    margin-bottom: 4px !important;
+  }
+  .welcome-banner p {
+    font-size: 0.74rem !important;
+    line-height: 1.35 !important;
   }
 
   /* Dashboard Stats Grid on Mobile */
   .stats-grid {
     grid-template-columns: repeat(2, 1fr) !important;
-    gap: 10px !important;
-    margin-bottom: 16px !important;
+    gap: 8px !important;
+    margin-bottom: 12px !important;
   }
 
   .stat-card {
-    padding: 12px 14px !important;
-    border-radius: 12px !important;
+    padding: 9px 10px !important;
+    border-radius: 10px !important;
   }
 
-  .stat-card-info h3 {
-    font-size: 1.25rem !important;
+  .stat-info h3, .stat-card-info h3 {
+    font-size: 0.68rem !important;
+    line-height: 1.2 !important;
+    margin-bottom: 2px !important;
+    font-weight: 600 !important;
+  }
+
+  .stat-value {
+    font-size: 1.22rem !important;
+    line-height: 1.1 !important;
+    font-weight: 700 !important;
   }
 
   .stat-card-info p {
-    font-size: 0.72rem !important;
+    font-size: 0.68rem !important;
   }
 
-  .stat-card-icon {
-    width: 38px !important;
-    height: 38px !important;
-    font-size: 1rem !important;
+  .stat-icon, .stat-card-icon {
+    width: 32px !important;
+    height: 32px !important;
+    font-size: 0.92rem !important;
+    border-radius: 8px !important;
   }
 
   .dashboard-details {
     grid-template-columns: 1fr !important;
-    gap: 16px !important;
+    gap: 12px !important;
   }
 
   /* Cards on Mobile */
   .card {
-    padding: 16px 14px !important;
-    border-radius: 14px !important;
-    margin-bottom: 16px !important;
+    padding: 12px 10px !important;
+    border-radius: 12px !important;
+    margin-bottom: 12px !important;
     max-width: 100% !important;
     box-sizing: border-box !important;
   }
@@ -2136,27 +2248,101 @@ tr:hover td {
   .card-header {
     flex-direction: column !important;
     align-items: stretch !important;
-    gap: 12px !important;
-    margin-bottom: 14px !important;
+    gap: 8px !important;
+    margin-bottom: 10px !important;
+    padding-bottom: 8px !important;
   }
 
-  .card-header h2 {
-    font-size: 1.15rem !important;
+  .card-header h2, .card-header h3 {
+    font-size: 0.95rem !important;
+    line-height: 1.25 !important;
+  }
+
+  .card-header p {
+    font-size: 0.72rem !important;
+    line-height: 1.25 !important;
   }
 
   .card-header .actions, .card-header .header-controls, .card-header .table-actions {
     display: flex !important;
     flex-wrap: wrap !important;
-    gap: 8px !important;
+    gap: 6px !important;
     width: 100% !important;
   }
 
   .card-header .actions .btn, .card-header .header-controls .btn, .card-header .table-actions .btn {
-    flex: 1 1 calc(50% - 6px) !important;
+    flex: 1 1 calc(50% - 4px) !important;
     justify-content: center !important;
-    font-size: 0.8rem !important;
-    padding: 8px 10px !important;
+    font-size: 0.76rem !important;
+    padding: 6px 8px !important;
     text-align: center;
+  }
+
+  /* Tindak Lanjut & Academic Alert on Mobile */
+  .tl-container {
+    margin-bottom: 14px !important;
+  }
+
+  .tl-filter-bar {
+    gap: 5px !important;
+    margin-bottom: 10px !important;
+  }
+
+  .tl-filter-chip {
+    padding: 3px 8px !important;
+    font-size: 0.7rem !important;
+    border-radius: 14px !important;
+  }
+
+  .tl-item {
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    padding: 10px 10px !important;
+    border-radius: 10px !important;
+    border-left-width: 4px !important;
+    gap: 8px !important;
+  }
+
+  .tl-item-main {
+    width: 100% !important;
+    gap: 10px !important;
+  }
+
+  .tl-avatar {
+    width: 32px !important;
+    height: 32px !important;
+    font-size: 0.78rem !important;
+  }
+
+  .tl-student-name {
+    font-size: 0.84rem !important;
+    font-weight: 700 !important;
+  }
+
+  .tl-info-header {
+    gap: 4px !important;
+    font-size: 0.72rem !important;
+  }
+
+  .tl-guardian-info {
+    font-size: 0.72rem !important;
+    gap: 6px !important;
+    margin-top: 3px !important;
+  }
+
+  .tl-actions {
+    width: 100% !important;
+    justify-content: flex-end !important;
+    border-top: 1px solid var(--border-color) !important;
+    padding-top: 6px !important;
+    margin-top: 4px !important;
+    gap: 5px !important;
+  }
+
+  .btn-wa-action {
+    padding: 5px 9px !important;
+    font-size: 0.74rem !important;
+    border-radius: 6px !important;
   }
 
   /* Data Tables on Mobile */
@@ -2165,17 +2351,66 @@ tr:hover td {
     max-width: 100% !important;
     overflow-x: auto !important;
     -webkit-overflow-scrolling: touch !important;
-    margin-bottom: 12px !important;
+    margin-bottom: 8px !important;
+    margin-top: 6px !important;
     border-radius: 8px !important;
   }
 
   .table-responsive table {
-    min-width: 520px !important;
+    min-width: 460px !important;
   }
 
   th, td {
-    padding: 10px 12px !important;
-    font-size: 0.85rem !important;
+    padding: 6px 8px !important;
+    font-size: 0.74rem !important;
+    line-height: 1.25 !important;
+  }
+
+  th {
+    font-size: 0.68rem !important;
+    font-weight: 700 !important;
+    text-transform: uppercase;
+  }
+
+  .badge {
+    font-size: 0.66rem !important;
+    padding: 2px 6px !important;
+    border-radius: 5px !important;
+  }
+
+  /* Buttons on Mobile */
+  .btn {
+    padding: 6px 10px !important;
+    font-size: 0.76rem !important;
+    border-radius: 7px !important;
+  }
+
+  .btn-sm {
+    padding: 4px 7px !important;
+    font-size: 0.7rem !important;
+    border-radius: 5px !important;
+  }
+
+  /* Forms on Mobile */
+  .form-row {
+    grid-template-columns: 1fr !important;
+    gap: 8px !important;
+  }
+
+  .form-group {
+    margin-bottom: 8px !important;
+  }
+
+  .form-group label {
+    font-size: 0.74rem !important;
+    margin-bottom: 3px !important;
+  }
+
+  .form-control, .login-input {
+    font-size: 0.82rem !important;
+    padding: 6px 9px !important;
+    border-radius: 7px !important;
+    height: auto !important;
   }
 
   /* Modals on Mobile */
@@ -2185,18 +2420,24 @@ tr:hover td {
     max-height: 85vh !important;
     max-height: 85dvh !important;
     overflow-y: auto !important;
-    padding: 18px 14px !important;
-    border-radius: 18px !important;
+    padding: 14px 12px !important;
+    border-radius: 14px !important;
     margin: auto !important;
   }
 
-  .modal-header h3 {
-    font-size: 1.15rem !important;
+  .modal-header h3, .modal-title {
+    font-size: 0.98rem !important;
+  }
+
+  .modal-body {
+    font-size: 0.78rem !important;
   }
 
   .modal-footer {
     flex-direction: column !important;
-    gap: 8px !important;
+    gap: 6px !important;
+    padding-top: 8px !important;
+    margin-top: 8px !important;
   }
 
   .modal-footer .btn {
@@ -2204,41 +2445,22 @@ tr:hover td {
     justify-content: center !important;
   }
 
-  .form-row {
-    grid-template-columns: 1fr !important;
-    gap: 12px !important;
-  }
-
-  .form-group {
-    margin-bottom: 12px !important;
-  }
-
-  .form-group label {
-    font-size: 0.82rem !important;
-    margin-bottom: 4px !important;
-  }
-
-  .form-control, .login-input {
-    font-size: 16px !important; /* Prevents auto zoom on mobile keyboard */
-    padding: 10px 12px !important;
-    border-radius: 8px !important;
-  }
-
   /* Absensi & Jadwal on Mobile */
   .attendance-row {
     grid-template-columns: 1fr !important;
-    gap: 10px !important;
-    padding: 10px 12px !important;
+    gap: 8px !important;
+    padding: 8px 10px !important;
   }
 
   .attendance-options {
     grid-template-columns: repeat(3, 1fr) !important;
-    gap: 6px !important;
+    gap: 5px !important;
   }
 
   .attendance-btn {
-    padding: 8px 4px !important;
-    font-size: 0.75rem !important;
+    padding: 6px 3px !important;
+    font-size: 0.7rem !important;
+    border-radius: 6px !important;
   }
 
   .schedule-container {
@@ -2263,20 +2485,62 @@ tr:hover td {
   .schedule-day-column:last-child {
     border-bottom: none !important;
   }
+
+  /* Login on Mobile */
+  .login-container {
+    padding: 12px !important;
+    max-width: 340px !important;
+  }
+
+  .login-card {
+    padding: 22px 16px 16px !important;
+    border-radius: 16px !important;
+  }
+
+  .login-icon {
+    width: 48px !important;
+    height: 48px !important;
+    font-size: 1.25rem !important;
+    margin-bottom: 10px !important;
+    border-radius: 14px !important;
+  }
+
+  .login-header h1 {
+    font-size: 1.45rem !important;
+  }
+
+  .login-header p {
+    font-size: 0.75rem !important;
+  }
+
+  .login-input {
+    font-size: 0.82rem !important;
+    padding: 8px 10px !important;
+  }
+
+  .login-btn {
+    padding: 10px !important;
+    font-size: 0.85rem !important;
+    border-radius: 10px !important;
+  }
 }
 
 /* Extra Small Mobile Devices (e.g. 320px - 480px width) */
 @media (max-width: 480px) {
+  html {
+    font-size: 13px !important;
+  }
+
   .stats-grid {
     grid-template-columns: 1fr 1fr !important;
-    gap: 8px !important;
+    gap: 6px !important;
   }
 
   .stat-card {
-    padding: 10px 12px !important;
+    padding: 7px 8px !important;
   }
 
-  .stat-card-info h3 {
+  .stat-value {
     font-size: 1.15rem !important;
   }
 
@@ -2286,12 +2550,29 @@ tr:hover td {
 
   .attendance-options {
     grid-template-columns: repeat(3, 1fr) !important;
+    gap: 4px !important;
   }
 
   .modal-content {
-    padding: 14px 10px !important;
+    padding: 12px 10px !important;
   }
 }
+
+/* Specific enhancements for Android Devices & WebView */
+html.android-device, body.android-device {
+  -webkit-text-size-adjust: 100% !important;
+  text-size-adjust: 100% !important;
+}
+
+html.android-device * {
+  max-height: 1000000px; /* Bypasses Chrome Android Font Boosting algorithm */
+}
+
+.android-device {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
 
 /* Import Page / Dropzone styles */
 .import-dropzone {

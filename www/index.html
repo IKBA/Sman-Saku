@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <title>Sman_Saku - Aplikasi Administrasi Guru</title>
-  <!-- Immediate Theme Pre-loader -->
+  <!-- Immediate Theme & Platform Pre-loader -->
   <script>
     (function() {
       try {
@@ -12,6 +12,9 @@
         var p = localStorage.getItem("saku_guru_palette") || "violet-modern";
         document.documentElement.setAttribute("data-theme", t);
         document.documentElement.setAttribute("data-palette", p);
+        if (window.Capacitor || /Android/i.test(navigator.userAgent)) {
+          document.documentElement.classList.add("android-device");
+        }
       } catch(e) {}
     })();
   </script>
@@ -33,7 +36,7 @@
   <link rel="icon" type="image/png" sizes="192x192" href="assets/icon-192.png">
 
   <!-- Custom Stylesheet -->
-  <link rel="stylesheet" href="style.css?v=1.2.0">
+  <link rel="stylesheet" href="style.css?v=1.2.3">
 </head>
 <body>
 
@@ -99,7 +102,7 @@
   </div>
 
   <!-- Sidebar -->
-  <aside id="app-sidebar">
+  <aside id="app-sidebar" style="display: none;">
     <div class="sidebar-brand">
       <i class="fas fa-graduation-cap"></i>
       <h2>Sman_Saku</h2>
@@ -173,9 +176,9 @@
   </aside>
 
   <!-- Main Content Wrapper -->
-  <main>
+  <main style="display: none;">
     <header class="no-print">
-      <div style="display: flex; align-items: center; gap: 12px;">
+      <div class="header-title-wrapper" style="display: flex; align-items: center; gap: 12px;">
         <button id="menu-toggle-btn" class="btn-menu-toggle" onclick="toggleSidebar()">
           <i class="fas fa-bars"></i>
         </button>
@@ -243,29 +246,31 @@
           </div>
         </div>
 
-        <!-- Cloud Sync Status Button -->
-        <button id="btn-cloud-sync" class="btn-cloud-sync" onclick="syncWithCloud(true)" title="Sinkronisasi Cloud (Web & Android)">
-          <i class="fas fa-cloud" id="cloud-sync-icon"></i>
-          <span id="cloud-sync-text" class="cloud-sync-label">Cloud</span>
-        </button>
+        <div class="header-tools-group">
+          <!-- Cloud Sync Status Button -->
+          <button id="btn-cloud-sync" class="btn-cloud-sync" onclick="syncWithCloud(true)" title="Sinkronisasi Cloud (Web & Android)">
+            <i class="fas fa-cloud" id="cloud-sync-icon"></i>
+            <span id="cloud-sync-text" class="cloud-sync-label">Cloud</span>
+          </button>
 
-        <!-- Install PWA Button (Hidden by default, shown when installable) -->
-        <button id="btn-pwa-install" class="btn-pwa-install" style="display:none;" onclick="triggerPwaInstall()" title="Pasang Aplikasi Sman_Saku di HP">
-          <i class="fas fa-mobile-screen-button"></i>
-          <span class="pwa-install-label">Pasang App</span>
-        </button>
+          <!-- Install PWA Button (Hidden by default, shown when installable) -->
+          <button id="btn-pwa-install" class="btn-pwa-install" style="display:none;" onclick="triggerPwaInstall()" title="Pasang Aplikasi Sman_Saku di HP">
+            <i class="fas fa-mobile-screen-button"></i>
+            <span class="pwa-install-label">Pasang App</span>
+          </button>
 
-        <!-- Theme Toggle Button -->
-        <button class="btn-theme-toggle" onclick="toggleTheme()" title="Ganti Tema">
-          <i class="fas fa-moon" id="theme-icon"></i>
-        </button>
-        
-        <!-- Profile Card -->
-        <div class="profile-card">
-          <div class="profile-avatar" id="header-avatar">BS</div>
-          <div class="profile-info">
-            <div class="profile-name" id="header-guru-name">Budi Santoso, S.Pd.</div>
-            <div class="profile-role" id="header-guru-nip">NIP: 198503112010011003</div>
+          <!-- Theme Toggle Button -->
+          <button class="btn-theme-toggle" onclick="toggleTheme()" title="Ganti Tema">
+            <i class="fas fa-moon" id="theme-icon"></i>
+          </button>
+          
+          <!-- Profile Card -->
+          <div class="profile-card">
+            <div class="profile-avatar" id="header-avatar">--</div>
+            <div class="profile-info">
+              <div class="profile-name" id="header-guru-name">Guru Sman_Saku</div>
+              <div class="profile-role" id="header-guru-nip">-</div>
+            </div>
           </div>
         </div>
 
@@ -305,7 +310,7 @@
   </div>
 
   <!-- Load Scripts -->
-  <script src="data-seed.js?v=1.2.0"></script>
-  <script src="app.js?v=1.2.0"></script>
+  <script src="data-seed.js?v=1.2.3"></script>
+  <script src="app.js?v=1.2.3"></script>
 </body>
 </html>

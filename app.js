@@ -168,6 +168,21 @@ function getLocalDateString() {
 // ==========================================
 const AUTH_STORAGE_KEY = "saku_guru_auth";
 const USERS_STORAGE_KEY = "saku_guru_users";
+const APP_BUILD_VERSION = "1.2.3_20261002";
+
+// Reset session on fresh installation or new APK build to always show login screen
+(function checkAppInstallVersion() {
+  try {
+    const lastBuild = localStorage.getItem("sman_saku_build_version");
+    if (lastBuild !== APP_BUILD_VERSION) {
+      // Reinstall or new build detected: clear session so user must pass login screen
+      localStorage.removeItem(AUTH_STORAGE_KEY);
+      localStorage.setItem("sman_saku_build_version", APP_BUILD_VERSION);
+    }
+  } catch(e) {
+    console.warn("Failed to check app build version:", e);
+  }
+})();
 
 // Default admin-registered users (email + password)
 async function getRegisteredUsers() {
@@ -182,9 +197,11 @@ async function getRegisteredUsers() {
   if (stored) {
     try { return JSON.parse(stored); } catch(e) { /* fall through */ }
   }
-  // Default users seeded by administrator
+  // Default users seeded by administrator (with offline teacher accounts)
   const defaultUsers = [
-    { email: "admin@smansaku.id", password: "admin123", nama: "Administrator Sman_Saku", role: "admin" }
+    { email: "admin@smansaku.id", password: "admin123", nama: "Administrator Sman_Saku", role: "admin" },
+    { email: "kamria@smansaku.id", password: "@kamria123", nama: "Dr. Kamria, S.Pd., M.Si", role: "admin" },
+    { email: "ikbar@smansaku.id", password: "r@bk10812", nama: "Muh. Ikbar, S.Pd., Gr", role: "guru" }
   ];
   localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(defaultUsers));
   return defaultUsers;
@@ -387,6 +404,104 @@ function getDbKey() {
   return "saku_guru_db_guest";
 }
 
+// Sanitasi data warisan / sampah dari aplikasi duplikat sebelumnya
+function cleanupLegacyDuplicateData(targetDb) {
+  if (!targetDb || typeof targetDb !== 'object') return false;
+  let modified = false;
+
+  // 1. Bersihkan guruProfile dari data dummy aplikasi duplikat
+  if (targetDb.guruProfile) {
+    if (targetDb.guruProfile.sekolah === "SMA Negeri 1 Jakarta") {
+      targetDb.guruProfile.sekolah = "SMA Negeri 1 Lasolo";
+      modified = true;
+    }
+    if (targetDb.guruProfile.alamat === "Jl. Budi Utomo No. 7, Jakarta Pusat") {
+      targetDb.guruProfile.alamat = "Konawe Utara, Sulawesi Tenggara";
+      modified = true;
+    }
+    if (targetDb.guruProfile.kepalaSekolah === "Drs. H. Ahmad Fauzi, M.Pd.") {
+      targetDb.guruProfile.kepalaSekolah = "";
+      modified = true;
+    }
+    if (targetDb.guruProfile.kepalaSekolahNip === "197208151998031002") {
+      targetDb.guruProfile.kepalaSekolahNip = "";
+      modified = true;
+    }
+    if (targetDb.guruProfile.nip === "198503112010011003") {
+      targetDb.guruProfile.nip = "";
+      modified = true;
+    }
+    if (targetDb.guruProfile.nama === "Budi Santoso, S.Pd.") {
+      const session = getSession();
+      targetDb.guruProfile.nama = (session && session.nama) ? session.nama : "Guru Pengampu";
+      modified = true;
+    }
+  }
+
+  // 2. Bersihkan kontak sampah sekolah Jakarta (kw-sma-1, kw-smp-1, kw-smp-2)
+  if (Array.isArray(targetDb.kontakWali)) {
+    const originalLen = targetDb.kontakWali.length;
+    targetDb.kontakWali = targetDb.kontakWali.filter(kw => {
+      if (kw.id === "kw-sma-1" || kw.id === "kw-smp-1" || kw.id === "kw-smp-2") return false;
+      if (kw.sekolah && (kw.sekolah.includes("SMP Negeri 2") || (kw.namaSiswa === "Aditya Pratama" && kw.kelasNama === "X IPA 1"))) return false;
+      return true;
+    });
+    // Ganti tag sekolah Jakarta pada data siswa riil menjadi SMA Negeri 1 Lasolo
+    targetDb.kontakWali.forEach(kw => {
+      if (kw.sekolah === "SMA Negeri 1 Jakarta") {
+        kw.sekolah = "SMA Negeri 1 Lasolo";
+        modified = true;
+      }
+    });
+    if (targetDb.kontakWali.length !== originalLen) modified = true;
+  }
+
+  // 3. Bersihkan kelas dummy (k-10a, k-10b, k-11a, k-12a) jika data riil sudah ada
+  if (Array.isArray(targetDb.kelas)) {
+    const hasDummy = targetDb.kelas.some(k => k.id === "k-10a" || k.id === "k-10b");
+    const hasReal = targetDb.kelas.some(k => k.id !== "k-10a" && k.id !== "k-10b" && k.id !== "k-11a" && k.id !== "k-12a");
+    if (hasDummy && hasReal) {
+      targetDb.kelas = targetDb.kelas.filter(k => !["k-10a", "k-10b", "k-11a", "k-12a"].includes(k.id));
+      modified = true;
+    }
+  }
+
+  // 4. Bersihkan siswa dummy (s-1 s/d s-14) jika data siswa riil sudah ada
+  if (Array.isArray(targetDb.siswa)) {
+    const dummyIds = ["s-1","s-2","s-3","s-4","s-5","s-6","s-7","s-8","s-9","s-10","s-11","s-12","s-13","s-14"];
+    const hasDummy = targetDb.siswa.some(s => dummyIds.includes(s.id));
+    const hasReal = targetDb.siswa.some(s => !dummyIds.includes(s.id));
+    if (hasDummy && hasReal) {
+      targetDb.siswa = targetDb.siswa.filter(s => !dummyIds.includes(s.id));
+      modified = true;
+    }
+  }
+
+  // 5. Bersihkan absensi dummy dari kelas k-10a
+  if (Array.isArray(targetDb.absensi)) {
+    const originalLen = targetDb.absensi.length;
+    targetDb.absensi = targetDb.absensi.filter(a => a.kelasId !== "k-10a" && a.kelasId !== "k-10b");
+    if (targetDb.absensi.length !== originalLen) modified = true;
+  }
+
+  // 6. Bersihkan nilai dummy
+  if (Array.isArray(targetDb.nilai)) {
+    const dummyStudentIds = ["s-1","s-2","s-3","s-4","s-5"];
+    const originalLen = targetDb.nilai.length;
+    targetDb.nilai = targetDb.nilai.filter(n => !dummyStudentIds.includes(n.siswaId));
+    if (targetDb.nilai.length !== originalLen) modified = true;
+  }
+
+  // 7. Bersihkan jurnal dummy
+  if (Array.isArray(targetDb.jurnal)) {
+    const originalLen = targetDb.jurnal.length;
+    targetDb.jurnal = targetDb.jurnal.filter(j => j.kelasId !== "k-10a" && j.id !== "jrn-1" && j.id !== "jrn-2");
+    if (targetDb.jurnal.length !== originalLen) modified = true;
+  }
+
+  return modified;
+}
+
 // Database Initialization
 async function initDatabase() {
   // 1. Load local data first as baseline/fallback
@@ -408,6 +523,7 @@ async function initDatabase() {
         parsed.mapel = parsed.mapel || ["Matematika", "Fisika", "Kimia", "Biologi", "Bahasa Indonesia", "Bahasa Inggris"];
         parsed.bobotNilai = parsed.bobotNilai || { "Tugas": 30, "UTS": 25, "UAS": 25, "Ulangan Harian": 10, "Nilai Praktek": 10 };
         parsed.kontakWali = parsed.kontakWali || [];
+        cleanupLegacyDuplicateData(parsed);
         localDb = parsed;
       }
     } catch (e) {
@@ -422,10 +538,11 @@ async function initDatabase() {
       if (!session || !session.email) {
         if (localDb) {
           db = localDb;
-          updateHeaderProfile();
-          return;
+        } else {
+          await loadSeedData();
         }
-        await loadSeedData();
+        cleanupLegacyDuplicateData(db);
+        updateHeaderProfile();
         return;
       }
 
@@ -452,6 +569,7 @@ async function initDatabase() {
             cloudDb.mapel = cloudDb.mapel || ["Matematika", "Fisika", "Kimia", "Biologi", "Bahasa Indonesia", "Bahasa Inggris"];
             cloudDb.bobotNilai = cloudDb.bobotNilai || { "Tugas": 30, "UTS": 25, "UAS": 25, "Ulangan Harian": 10, "Nilai Praktek": 10 };
             cloudDb.kontakWali = cloudDb.kontakWali || [];
+            cleanupLegacyDuplicateData(cloudDb);
 
             if (localDb) {
               // Compare timestamps and demo status
@@ -464,6 +582,7 @@ async function initDatabase() {
               if (localDb.is_demo && !cloudDb.is_demo) {
                 console.log("Local database is demo data but cloud database is real. Syncing cloud to local instead.");
                 db = cloudDb;
+                cleanupLegacyDuplicateData(db);
                 try {
                   localStorage.setItem(dbKey, JSON.stringify(db));
                 } catch(e) {
@@ -476,6 +595,7 @@ async function initDatabase() {
               if (localTime > cloudTime) {
                 console.log("Local database is newer than cloud. Syncing local to cloud.");
                 db = localDb;
+                cleanupLegacyDuplicateData(db);
                 await saveDatabase(false); // Upload local to cloud (no new mutation)
                 updateHeaderProfile();
                 return;
@@ -484,6 +604,7 @@ async function initDatabase() {
             
             console.log("Cloud database loaded and synchronized to local.");
             db = cloudDb;
+            cleanupLegacyDuplicateData(db);
             // Sync to local cache
             try {
               localStorage.setItem(dbKey, JSON.stringify(db));
@@ -499,6 +620,7 @@ async function initDatabase() {
         if (localDb) {
           console.log("No valid cloud database found, but local database exists. Syncing local to cloud.");
           db = localDb;
+          cleanupLegacyDuplicateData(db);
           await saveDatabase(false); // upload baseline only
           updateHeaderProfile();
           return;
@@ -506,15 +628,18 @@ async function initDatabase() {
         
         // No cloud data, no local data: load seeds
         await loadSeedData();
+        cleanupLegacyDuplicateData(db);
+        updateHeaderProfile();
         return;
       } else {
         console.warn("Supabase query error, falling back to local database:", error);
         if (localDb) {
           db = localDb;
-          updateHeaderProfile();
-          return;
+        } else {
+          await loadSeedData();
         }
-        await loadSeedData();
+        cleanupLegacyDuplicateData(db);
+        updateHeaderProfile();
         return;
       }
     } catch(e) {
@@ -525,10 +650,11 @@ async function initDatabase() {
   // 3. Local Mode Fallback (if cloud mode is off or failed)
   if (localDb) {
     db = localDb;
-    updateHeaderProfile();
   } else {
     await loadSeedData();
   }
+  cleanupLegacyDuplicateData(db);
+  updateHeaderProfile();
 }
 
 async function loadSeedData() {
@@ -2434,18 +2560,18 @@ function renderDashboardAcademicAlerts(containerId = "dashboard-akademik-section
 
       ${allIssues.length > 0 ? `
         <!-- Filter Controls Bar -->
-        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 14px; background: var(--bg-app); padding: 10px 14px; border-radius: 10px; border: 1px solid var(--border-color);">
-          <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap; flex: 1;">
-            <div style="min-width: 180px;">
-              <select class="form-control form-control-sm" style="font-weight: 600; font-size: 0.82rem;" onchange="setAcademicMapelFilter(this.value)">
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; background: var(--bg-app); padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border-color);">
+          <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap; flex: 1 1 260px;">
+            <div style="flex: 1 1 130px; min-width: 120px;">
+              <select class="form-control form-control-sm" style="font-weight: 600; font-size: 0.82rem; width: 100%;" onchange="setAcademicMapelFilter(this.value)">
                 ${mapelFilterOptions}
               </select>
             </div>
-            <div style="flex: 1; min-width: 160px; max-width: 280px;">
-              <input type="text" class="form-control form-control-sm" placeholder="Cari nama siswa / NISN..." value="${window.activeAcademicSearchQuery || ''}" oninput="setAcademicSearchQuery(this.value)" style="font-size: 0.82rem;">
+            <div style="flex: 1 1 130px; min-width: 120px;">
+              <input type="text" class="form-control form-control-sm" placeholder="Cari nama siswa / NISN..." value="${window.activeAcademicSearchQuery || ''}" oninput="setAcademicSearchQuery(this.value)" style="font-size: 0.82rem; width: 100%;">
             </div>
           </div>
-          <div style="font-size: 0.78rem; color: var(--text-muted);">
+          <div style="font-size: 0.76rem; color: var(--text-muted); flex: 1 1 auto; text-align: right;">
             Menampilkan: <b>${filteredIssues.length}</b> dari <b>${allIssues.length}</b> kendala
           </div>
         </div>
@@ -4405,10 +4531,10 @@ function displayPhoneNumber(phone) {
 }
 
 function getCurrentSchoolName() {
-  if (db.guruProfile && db.guruProfile.sekolah && db.guruProfile.sekolah.trim()) {
+  if (db.guruProfile && db.guruProfile.sekolah && db.guruProfile.sekolah.trim() && db.guruProfile.sekolah.trim() !== "SMA Negeri 1 Jakarta") {
     return db.guruProfile.sekolah.trim();
   }
-  return "SMA Negeri 1 Jakarta";
+  return "SMA Negeri 1 Lasolo";
 }
 
 function getAllDistinctSchools() {
@@ -9413,7 +9539,7 @@ function renderRekap(container) {
           <p id="report-kepsek-nip">NIP: ${db.guruProfile.kepalaSekolahNip || '-'}</p>
         </div>
         <div style="width: 240px;">
-          <p>${db.guruProfile.sekolah.split(" ").slice(-1)[0] || "Jakarta"}, ${new Date().toLocaleDateString('id-ID', { year: 'numeric', month: 'long', day: 'numeric' })}</p>
+          <p>${(db.guruProfile.sekolah && !db.guruProfile.sekolah.includes("Jakarta")) ? (db.guruProfile.sekolah.split(" ").slice(-1)[0] || "Lasolo") : "Lasolo"}, ${new Date().toLocaleDateString('id-ID', { year: 'numeric', month: 'long', day: 'numeric' })}</p>
           <p>Guru Pengampu,</p>
           <div style="height: 70px;"></div>
           <p style="text-decoration: underline; font-weight:700;">${db.guruProfile.nama}</p>
@@ -9994,7 +10120,10 @@ function renderProfil(container) {
             <button class="btn btn-primary btn-sm" onclick="showAddUserModal()"><i class="fas fa-plus"></i> Tambah Akun</button>
           </div>
           <p style="font-size:0.85rem; color:var(--text-muted); margin-bottom:15px;">
-            Kelola akun email dan password yang diperbolehkan masuk ke aplikasi Sman_Saku.
+            Kelola akun email dan password yang diperbolehkan masuk ke aplikasi Sman_Saku.<br>
+            <span style="display:inline-flex; align-items:center; gap:6px; margin-top:5px; font-size:0.8rem; color:var(--primary); background:rgba(30,58,138,0.06); padding:4px 10px; border-radius:6px; border:1px solid rgba(30,58,138,0.12);">
+              <i class="fas fa-shield-alt"></i> <span><strong>Akun Utama:</strong> <code>admin@smansaku.id</code> tidak dapat dihapus. Akun Administrator lain hanya dapat dihapus oleh Akun Utama.</span>
+            </span>
           </p>
           <div class="table-responsive">
             <table>
@@ -10251,6 +10380,7 @@ async function loadUsersTable() {
   const session = getSession();
   const isAdmin = session && session.role === "admin";
   const currentEmail = session ? session.email.toLowerCase() : "";
+  const isPrimaryAdmin = currentEmail === "admin@smansaku.id";
 
   if (users.length === 0) {
     tbody.innerHTML = `<tr><td colspan="${isAdmin ? 5 : 4}" style="text-align: center; color: var(--text-muted);">Belum ada data akun terdaftar.</td></tr>`;
@@ -10258,19 +10388,60 @@ async function loadUsersTable() {
   }
 
   tbody.innerHTML = users.map((u, idx) => {
-    const isSelf = u.email.toLowerCase() === currentEmail;
-    const roleBadge = u.role === "admin" ? "badge-hadir" : "badge-izin";
-    const roleText = u.role === "admin" ? "Admin" : "Guru";
+    const targetEmail = u.email.toLowerCase();
+    const isSelf = targetEmail === currentEmail;
+    const isTargetPrimary = targetEmail === "admin@smansaku.id";
+    const isTargetAdmin = u.role === "admin";
+
+    let roleBadge = "badge-izin";
+    let roleText = "Guru";
+    let primaryBadge = "";
+
+    if (isTargetPrimary) {
+      roleBadge = "badge-hadir";
+      roleText = "Super Admin";
+      primaryBadge = `<span class="badge" style="background: rgba(245, 158, 11, 0.15); color: #d97706; border: 1px solid rgba(245, 158, 11, 0.3); font-size: 0.72rem; margin-left: 6px;"><i class="fas fa-crown"></i> Akun Utama</span>`;
+    } else if (isTargetAdmin) {
+      roleBadge = "badge-hadir";
+      roleText = "Admin";
+    }
     
     let actionsHtml = "";
     if (isAdmin) {
+      // Edit button logic
+      let editBtnHtml = "";
+      if (isTargetPrimary && !isPrimaryAdmin) {
+        editBtnHtml = `<button class="btn btn-secondary btn-sm" disabled style="opacity: 0.4; cursor: not-allowed;" title="Hanya Akun Utama yang dapat mengedit data admin@smansaku.id"><i class="fas fa-lock"></i> Terkunci</button>`;
+      } else if (isTargetAdmin && !isTargetPrimary && !isPrimaryAdmin && !isSelf) {
+        editBtnHtml = `<button class="btn btn-secondary btn-sm" disabled style="opacity: 0.4; cursor: not-allowed;" title="Hanya Akun Utama yang dapat mengedit sesama Administrator"><i class="fas fa-lock"></i> Terkunci</button>`;
+      } else {
+        editBtnHtml = `<button class="btn btn-secondary btn-sm" onclick="showEditUserModal('${u.email}')"><i class="fas fa-edit"></i> Edit</button>`;
+      }
+
+      // Delete button logic
+      let deleteBtnHtml = "";
+      if (isTargetPrimary) {
+        // Akun Utama tidak pernah bisa dihapus oleh siapapun
+        deleteBtnHtml = `<button class="btn btn-danger btn-sm" disabled style="opacity: 0.4; cursor: not-allowed;" title="Akun Utama (admin@smansaku.id) tidak dapat dihapus"><i class="fas fa-ban"></i> Terkunci</button>`;
+      } else if (isSelf) {
+        // Tidak dapat menghapus akun sendiri yang sedang aktif
+        deleteBtnHtml = `<button class="btn btn-danger btn-sm" disabled style="opacity: 0.4; cursor: not-allowed;" title="Tidak dapat menghapus akun sendiri yang sedang aktif"><i class="fas fa-trash"></i> Hapus</button>`;
+      } else if (isTargetAdmin) {
+        // Akun admin lainnya HANYA bisa dihapus oleh akun admin@smansaku.id
+        if (isPrimaryAdmin) {
+          deleteBtnHtml = `<button class="btn btn-danger btn-sm" onclick="deleteUser('${u.email}')" title="Hapus akun Administrator"><i class="fas fa-trash"></i> Hapus</button>`;
+        } else {
+          deleteBtnHtml = `<button class="btn btn-danger btn-sm" disabled style="opacity: 0.4; cursor: not-allowed;" title="Hanya Akun Utama (admin@smansaku.id) yang dapat menghapus akun Administrator"><i class="fas fa-lock"></i> Terkunci</button>`;
+        }
+      } else {
+        // Akun guru biasa: dapat dihapus oleh admin mana pun
+        deleteBtnHtml = `<button class="btn btn-danger btn-sm" onclick="deleteUser('${u.email}')" title="Hapus akun guru"><i class="fas fa-trash"></i> Hapus</button>`;
+      }
+
       actionsHtml = `
         <td class="actions-cell">
-          <button class="btn btn-secondary btn-sm" onclick="showEditUserModal('${u.email}')"><i class="fas fa-edit"></i> Edit</button>
-          ${isSelf 
-            ? `<button class="btn btn-danger btn-sm" disabled style="opacity: 0.5; cursor: not-allowed;" title="Tidak dapat menghapus akun sendiri yang sedang login"><i class="fas fa-trash"></i> Hapus</button>` 
-            : `<button class="btn btn-danger btn-sm" onclick="deleteUser('${u.email}')"><i class="fas fa-trash"></i> Hapus</button>`
-          }
+          ${editBtnHtml}
+          ${deleteBtnHtml}
         </td>
       `;
     }
@@ -10278,7 +10449,7 @@ async function loadUsersTable() {
     return `
       <tr>
         <td>${idx + 1}</td>
-        <td><strong>${u.nama}</strong></td>
+        <td><strong>${u.nama}</strong>${primaryBadge}</td>
         <td><code>${u.email}</code><br><span style="font-size:0.75rem; color:var(--text-muted);">Password: ${u.password}</span></td>
         <td><span class="badge ${roleBadge}">${roleText}</span></td>
         ${actionsHtml}
@@ -10289,6 +10460,10 @@ async function loadUsersTable() {
 
 // Show Add User Modal
 function showAddUserModal() {
+  const session = getSession();
+  const currentEmail = session ? session.email.toLowerCase() : "";
+  const isPrimaryAdmin = currentEmail === "admin@smansaku.id";
+
   const formHtml = `
     <div class="form-group">
       <label class="form-label" for="user-email">Email</label>
@@ -10306,8 +10481,9 @@ function showAddUserModal() {
       <label class="form-label" for="user-role">Peran (Role)</label>
       <select id="user-role" class="form-control" required>
         <option value="guru" selected>Guru</option>
-        <option value="admin">Administrator</option>
+        ${isPrimaryAdmin ? '<option value="admin">Administrator</option>' : ''}
       </select>
+      ${!isPrimaryAdmin ? '<small style="color:var(--text-muted); font-size:0.75rem; display:block; margin-top:4px;"><i class="fas fa-info-circle"></i> Hanya Akun Utama (admin@smansaku.id) yang dapat membuat akun Administrator baru.</small>' : ''}
     </div>
   `;
 
@@ -10326,6 +10502,10 @@ async function submitAddUser() {
   const password = document.getElementById("user-password").value.trim();
   const role = document.getElementById("user-role").value;
 
+  const session = getSession();
+  const currentEmail = session ? session.email.toLowerCase() : "";
+  const isPrimaryAdmin = currentEmail === "admin@smansaku.id";
+
   if (!email || !nama || !password) {
     alert("Semua field wajib diisi!");
     return;
@@ -10335,6 +10515,11 @@ async function submitAddUser() {
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   if (!emailRegex.test(email)) {
     alert("Format email tidak valid!");
+    return;
+  }
+
+  if (role === "admin" && !isPrimaryAdmin) {
+    alert("Hanya Akun Utama (admin@smansaku.id) yang berhak menambahkan akun Administrator baru!");
     return;
   }
 
@@ -10371,11 +10556,33 @@ async function showEditUserModal(email) {
   const user = users.find(u => u.email.toLowerCase() === email.toLowerCase());
   if (!user) return;
 
+  const session = getSession();
+  const currentEmail = session ? session.email.toLowerCase() : "";
+  const isPrimaryAdmin = currentEmail === "admin@smansaku.id";
+  const targetEmail = user.email.toLowerCase();
+  const isTargetPrimary = targetEmail === "admin@smansaku.id";
+  const isSelf = targetEmail === currentEmail;
+
+  // Proteksi: Jika target adalah admin@smansaku.id tapi yang login bukan admin@smansaku.id
+  if (isTargetPrimary && !isPrimaryAdmin) {
+    alert("Akses ditolak: Akun Utama (admin@smansaku.id) hanya dapat diedit oleh akun admin@smansaku.id!");
+    return;
+  }
+
+  // Proteksi: Jika target adalah admin lain dan yang login bukan admin@smansaku.id dan bukan akun itu sendiri
+  if (user.role === "admin" && !isPrimaryAdmin && !isSelf) {
+    alert("Akses ditolak: Hanya Akun Utama yang dapat mengedit data Administrator lain!");
+    return;
+  }
+
+  const isEmailLocked = isTargetPrimary;
+  const isRoleLocked = isTargetPrimary || !isPrimaryAdmin;
+
   const formHtml = `
     <input type="hidden" id="edit-user-old-email" value="${user.email}">
     <div class="form-group">
-      <label class="form-label" for="edit-user-email">Email</label>
-      <input type="email" id="edit-user-email" class="form-control" value="${user.email}" required>
+      <label class="form-label" for="edit-user-email">Email ${isEmailLocked ? '<span style="color:var(--accent); font-size:0.75rem;">(Terkunci - Akun Utama)</span>' : ''}</label>
+      <input type="email" id="edit-user-email" class="form-control" value="${user.email}" ${isEmailLocked ? 'readonly style="background-color:var(--bg-secondary); cursor:not-allowed;"' : ''} required>
     </div>
     <div class="form-group">
       <label class="form-label" for="edit-user-nama">Nama Lengkap</label>
@@ -10386,11 +10593,18 @@ async function showEditUserModal(email) {
       <input type="text" id="edit-user-password" class="form-control" value="${user.password}" required>
     </div>
     <div class="form-group">
-      <label class="form-label" for="edit-user-role">Peran (Role)</label>
-      <select id="edit-user-role" class="form-control" required>
-        <option value="guru" ${user.role === 'guru' ? 'selected' : ''}>Guru</option>
-        <option value="admin" ${user.role === 'admin' ? 'selected' : ''}>Administrator</option>
-      </select>
+      <label class="form-label" for="edit-user-role">Peran (Role) ${isRoleLocked ? '<span style="color:var(--text-muted); font-size:0.75rem;">(Terkunci)</span>' : ''}</label>
+      ${isRoleLocked ? `
+        <input type="hidden" id="edit-user-role" value="${user.role}">
+        <input type="text" class="form-control" value="${user.role === 'admin' ? (isTargetPrimary ? 'Super Admin (Akun Utama)' : 'Administrator') : 'Guru'}" disabled style="background-color:var(--bg-secondary); cursor:not-allowed;">
+        ${!isPrimaryAdmin ? '<small style="color:var(--text-muted); font-size:0.75rem; display:block; margin-top:4px;"><i class="fas fa-info-circle"></i> Hanya Akun Utama yang berhak mengubah peran akun.</small>' : ''}
+      ` : `
+        <select id="edit-user-role" class="form-control" required>
+          <option value="guru" ${user.role === 'guru' ? 'selected' : ''}>Guru</option>
+          <option value="admin" ${user.role === 'admin' ? 'selected' : ''}>Administrator</option>
+        </select>
+      `}
+      ${isTargetPrimary ? '<small style="color:var(--text-muted); font-size:0.75rem; display:block; margin-top:4px;"><i class="fas fa-info-circle"></i> Peran Akun Utama selalu Administrator dan tidak dapat diubah.</small>' : ''}
     </div>
   `;
 
@@ -10399,16 +10613,42 @@ async function showEditUserModal(email) {
     <button class="btn btn-primary" onclick="submitEditUser()">Simpan Perubahan</button>
   `;
 
-  openModal("Edit Akun Guru", formHtml, footerHtml);
+  openModal("Edit Akun Pengguna", formHtml, footerHtml);
 }
 
 // Submit Edit User
 async function submitEditUser() {
   const oldEmail = document.getElementById("edit-user-old-email").value.toLowerCase();
-  const email = document.getElementById("edit-user-email").value.trim().toLowerCase();
+  let email = document.getElementById("edit-user-email").value.trim().toLowerCase();
   const nama = document.getElementById("edit-user-nama").value.trim();
   const password = document.getElementById("edit-user-password").value.trim();
-  const role = document.getElementById("edit-user-role").value;
+  let role = document.getElementById("edit-user-role").value;
+
+  const session = getSession();
+  const currentEmail = session ? session.email.toLowerCase() : "";
+  const isPrimaryAdmin = currentEmail === "admin@smansaku.id";
+  const isTargetPrimary = oldEmail === "admin@smansaku.id";
+
+  if (isTargetPrimary && !isPrimaryAdmin) {
+    alert("Akses ditolak: Hanya Akun Utama yang dapat memperbarui data admin@smansaku.id!");
+    return;
+  }
+
+  // Akun utama (admin@smansaku.id) email dan peran tidak pernah boleh diubah
+  if (isTargetPrimary) {
+    email = "admin@smansaku.id";
+    role = "admin";
+  }
+
+  // Jika bukan primary admin, tidak boleh mengangkat akun menjadi admin
+  if (!isPrimaryAdmin && role === "admin") {
+    const usersCheck = await getRegisteredUsers();
+    const existing = usersCheck.find(u => u.email.toLowerCase() === oldEmail);
+    if (!existing || existing.role !== "admin") {
+      alert("Hanya Akun Utama (admin@smansaku.id) yang dapat menetapkan peran Administrator!");
+      return;
+    }
+  }
 
   if (!email || !nama || !password) {
     alert("Semua field wajib diisi!");
@@ -10445,19 +10685,15 @@ async function submitEditUser() {
       try {
         if (email !== oldEmail) {
           // Supabase Safe Migration: Write-Before-Delete
-          // 1. Fetch old database first
           const { data: dbRow } = await supabase.from("saku_guru_databases").select("data").eq("email", oldEmail).maybeSingle();
           const oldDbData = dbRow ? dbRow.data : null;
 
-          // 2. Insert new user profile
           await supabase.from("saku_guru_users").insert({ email, nama, password, role });
 
-          // 3. Upsert database to new email if old database exists
           if (oldDbData) {
             await supabase.from("saku_guru_databases").upsert({ email, data: oldDbData, updated_at: new Date().toISOString() }, { onConflict: "email" });
           }
 
-          // 4. Delete old rows once new ones are safely created
           await supabase.from("saku_guru_users").delete().eq("email", oldEmail);
           if (oldDbData) {
             await supabase.from("saku_guru_databases").delete().eq("email", oldEmail);
@@ -10471,7 +10707,6 @@ async function submitEditUser() {
     }
 
     // If the edited user is the current session user, update the session name/role too
-    const session = getSession();
     if (session && session.email.toLowerCase() === oldEmail) {
       session.email = email;
       session.nama = nama;
@@ -10491,32 +10726,58 @@ async function submitEditUser() {
 // Delete User
 async function deleteUser(email) {
   const session = getSession();
-  if (session && session.email.toLowerCase() === email.toLowerCase()) {
+  const currentEmail = session ? session.email.toLowerCase() : "";
+  const isPrimaryAdmin = currentEmail === "admin@smansaku.id";
+  const targetEmail = (email || "").toLowerCase().trim();
+
+  // 1. Akun utama (admin@smansaku.id) tidak dapat dihapus oleh siapa pun
+  if (targetEmail === "admin@smansaku.id") {
+    alert("Akun Administrator Utama (admin@smansaku.id) adalah akun utama yang tidak dapat dihapus!");
+    return;
+  }
+
+  // 2. Akun sendiri yang sedang aktif tidak dapat dihapus
+  if (currentEmail === targetEmail) {
     alert("Anda tidak dapat menghapus akun Anda sendiri yang sedang aktif!");
     return;
   }
 
-  if (confirm(`Apakah Anda yakin ingin menghapus akun ${email}? Akun ini tidak akan dapat login lagi.`)) {
+  const users = await getRegisteredUsers();
+  const targetUser = users.find(u => u.email.toLowerCase() === targetEmail);
+  if (!targetUser) {
+    alert("Akun tidak ditemukan!");
+    return;
+  }
+
+  // 3. Akun admin lainnya hanya bisa dihapus oleh akun admin@smansaku.id
+  if (targetUser.role === "admin") {
+    if (!isPrimaryAdmin) {
+      alert("Akses ditolak: Akun Administrator hanya bisa dihapus oleh Akun Utama (admin@smansaku.id)!");
+      return;
+    }
+  }
+
+  if (confirm(`Apakah Anda yakin ingin menghapus akun ${targetUser.nama} (${targetEmail})? Akun ini tidak akan dapat login lagi.`)) {
     // Delete from Supabase cloud if available
     if (isCloudMode && supabase) {
       try {
         // saku_guru_databases has ON DELETE CASCADE, so deleting user also deletes their database row
-        await supabase.from("saku_guru_users").delete().eq("email", email.toLowerCase());
+        await supabase.from("saku_guru_users").delete().eq("email", targetEmail);
       } catch(e) {
         console.error("Supabase deleteUser error:", e);
       }
     }
 
-    let users = await getRegisteredUsers();
-    users = users.filter(u => u.email.toLowerCase() !== email.toLowerCase());
-    await saveRegisteredUsers(users);
+    let updatedUsers = await getRegisteredUsers();
+    updatedUsers = updatedUsers.filter(u => u.email.toLowerCase() !== targetEmail);
+    await saveRegisteredUsers(updatedUsers);
 
     // Delete database key for this user
-    const dbKey = "saku_guru_db_" + email.toLowerCase().replace(/[^a-z0-9]/g, "_");
+    const dbKey = "saku_guru_db_" + targetEmail.replace(/[^a-z0-9]/g, "_");
     localStorage.removeItem(dbKey);
 
     await loadUsersTable();
-    showToast(`Akun ${email} berhasil dihapus.`);
+    showToast(`Akun ${targetEmail} berhasil dihapus.`);
   }
 }
 
@@ -10942,23 +11203,23 @@ function renderSidebarMenu() {
   let items = [];
   if (currentAppMode === "walikelas") {
     items = [
-      { page: "dashboard", icon: "fas fa-chart-pie", label: "Dashboard Wali" },
-      { page: "rekap_final", icon: "fas fa-clipboard-check", label: "Rekap Presensi Final" },
-      { page: "siswa_kelas", icon: "fas fa-users-rectangle", label: "Siswa Kelas Binaan" },
-      { page: "ledger_nilai", icon: "fas fa-table-list", label: "Ledger Nilai Siswa" },
-      { page: "catatan_wali", icon: "fas fa-book-bookmark", label: "Catatan Pembinaan" },
-      { page: "kontak", icon: "fas fa-address-book", label: "Kontak Wali Murid" },
-      { page: "profil", icon: "fas fa-user-cog", label: "Profil Pengguna" }
+      { page: "dashboard", icon: "fas fa-chart-pie", label: "Dashboard" },
+      { page: "rekap_final", icon: "fas fa-clipboard-check", label: "Rekap Final" },
+      { page: "siswa_kelas", icon: "fas fa-users-rectangle", label: "Siswa Kelas" },
+      { page: "ledger_nilai", icon: "fas fa-table-list", label: "Ledger Nilai" },
+      { page: "catatan_wali", icon: "fas fa-book-bookmark", label: "Buku Kasus" },
+      { page: "kontak", icon: "fas fa-address-book", label: "Kontak Wali" },
+      { page: "profil", icon: "fas fa-user-cog", label: "Profil" }
     ];
   } else if (currentAppMode === "guruwali") {
     items = [
-      { page: "dashboard", icon: "fas fa-chart-pie", label: "Dashboard Guru Wali" },
-      { page: "siswa_asuhan", icon: "fas fa-users", label: "Daftar Siswa Asuhan" },
-      { page: "tambah_siswa_asuhan", icon: "fas fa-user-plus", label: "Tambah Siswa Asuhan" },
-      { page: "jurnal_bimbingan", icon: "fas fa-hand-holding-heart", label: "Jurnal Bimbingan" },
-      { page: "pantauan_absensi", icon: "fas fa-clipboard-user", label: "Pantauan Presensi" },
-      { page: "kontak", icon: "fas fa-address-book", label: "Kontak Wali Murid" },
-      { page: "profil", icon: "fas fa-user-cog", label: "Profil Pengguna" }
+      { page: "dashboard", icon: "fas fa-chart-pie", label: "Dashboard" },
+      { page: "siswa_asuhan", icon: "fas fa-users", label: "Siswa Asuhan" },
+      { page: "tambah_siswa_asuhan", icon: "fas fa-user-plus", label: "+ Asuhan" },
+      { page: "jurnal_bimbingan", icon: "fas fa-hand-holding-heart", label: "Bimbingan" },
+      { page: "pantauan_absensi", icon: "fas fa-clipboard-user", label: "Presensi" },
+      { page: "kontak", icon: "fas fa-address-book", label: "Kontak Wali" },
+      { page: "profil", icon: "fas fa-user-cog", label: "Profil" }
     ];
   } else {
     items = [
@@ -10966,11 +11227,11 @@ function renderSidebarMenu() {
       { page: "kelas", icon: "fas fa-school", label: "Data Kelas" },
       { page: "siswa", icon: "fas fa-user-graduate", label: "Data Siswa" },
       { page: "kontak", icon: "fas fa-address-book", label: "Kontak Wali" },
-      { page: "jadwal", icon: "fas fa-calendar-alt", label: "Jadwal Mengajar" },
-      { page: "absensi", icon: "fas fa-clipboard-user", label: "Absensi Siswa" },
+      { page: "jadwal", icon: "fas fa-calendar-alt", label: "Jadwal" },
+      { page: "absensi", icon: "fas fa-clipboard-user", label: "Absensi" },
       { page: "nilai", icon: "fas fa-award", label: "Nilai Siswa" },
-      { page: "jurnal", icon: "fas fa-book-open", label: "Jurnal Mengajar" },
-      { page: "rekap", icon: "fas fa-print", label: "Rekap & Cetak" },
+      { page: "jurnal", icon: "fas fa-book-open", label: "Jurnal" },
+      { page: "rekap", icon: "fas fa-print", label: "Rekap" },
       { page: "profil", icon: "fas fa-user-cog", label: "Profil" }
     ];
   }
@@ -11098,26 +11359,26 @@ function renderDashboardWaliKelas(container) {
 
   container.innerHTML = `
     <!-- Control Bar Wali Kelas -->
-    <div class="card" style="margin-bottom: 20px; border-top: 4px solid #10b981;">
-      <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px;">
-        <div style="display: flex; align-items: center; gap: 14px; flex-wrap: wrap;">
-          <div>
-            <label style="font-size: 0.78rem; font-weight: 700; color: var(--text-muted); display: block; margin-bottom: 4px; text-transform: uppercase;">
+    <div class="card" style="margin-bottom: 16px; border-top: 4px solid #10b981;">
+      <div style="display: flex; justify-content: space-between; align-items: stretch; flex-wrap: wrap; gap: 12px;">
+        <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap; flex: 1 1 280px;">
+          <div style="flex: 1 1 140px; min-width: 130px;">
+            <label style="font-size: 0.75rem; font-weight: 700; color: var(--text-muted); display: block; margin-bottom: 4px; text-transform: uppercase;">
               <i class="fas fa-school"></i> Kelas Binaan Anda:
             </label>
-            <select class="form-control" style="font-weight: 600; min-width: 220px;" onchange="setWaliKelasClassId(this.value)">
+            <select class="form-control" style="font-weight: 600; width: 100%; min-width: 130px;" onchange="setWaliKelasClassId(this.value)">
               ${kelasOptions}
             </select>
           </div>
-          <div>
-            <label style="font-size: 0.78rem; font-weight: 700; color: var(--text-muted); display: block; margin-bottom: 4px; text-transform: uppercase;">
+          <div style="flex: 1 1 130px; min-width: 130px;">
+            <label style="font-size: 0.75rem; font-weight: 700; color: var(--text-muted); display: block; margin-bottom: 4px; text-transform: uppercase;">
               <i class="fas fa-calendar-day"></i> Tanggal Presensi:
             </label>
-            <input type="date" id="walikelas-date-input" class="form-control" value="${currentWaliKelasDate}" onchange="changeWaliKelasDate(this.value)">
+            <input type="date" id="walikelas-date-input" class="form-control" style="width: 100%; min-width: 130px;" value="${currentWaliKelasDate}" onchange="changeWaliKelasDate(this.value)">
           </div>
         </div>
-        <div style="display: flex; gap: 10px; flex-wrap: wrap;">
-          <button type="button" class="btn btn-success" onclick="shareWaliKelasDailyRecapWA('${classId}', '${currentWaliKelasDate}')" style="box-shadow: 0 2px 8px rgba(16, 185, 129, 0.3);">
+        <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-end; flex: 1 1 auto;">
+          <button type="button" class="btn btn-success" onclick="shareWaliKelasDailyRecapWA('${classId}', '${currentWaliKelasDate}')" style="box-shadow: 0 2px 8px rgba(16, 185, 129, 0.3); width: 100%; justify-content: center;">
             <i class="fab fa-whatsapp" style="font-size: 1.05rem;"></i> Bagikan Rekap ke Grup WA Wali Murid
           </button>
         </div>
@@ -11590,16 +11851,16 @@ function renderSiswaKelasWaliKelas(container) {
   container.innerHTML = `
     <div class="card" style="margin-bottom: 20px;">
       <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 14px;">
-        <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
-          <div>
+        <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap; flex: 1 1 280px;">
+          <div style="flex: 1 1 140px; min-width: 130px;">
             <label style="font-size: 0.76rem; font-weight: 700; color: var(--text-muted); display: block; margin-bottom: 4px;">PILIH KELAS BINAAN:</label>
-            <select class="form-control" style="font-weight: 600; min-width: 200px;" onchange="setWaliKelasClassId(this.value)">
+            <select class="form-control" style="font-weight: 600; width: 100%; min-width: 130px;" onchange="setWaliKelasClassId(this.value)">
               ${kelasOptions}
             </select>
           </div>
-          <div>
+          <div style="flex: 1 1 140px; min-width: 130px;">
             <label style="font-size: 0.76rem; font-weight: 700; color: var(--text-muted); display: block; margin-bottom: 4px;">CARI SISWA:</label>
-            <input type="text" id="cari-siswa-kelas-input" class="form-control" placeholder="Ketik nama atau NISN..." oninput="filterSiswaKelasWaliTable()">
+            <input type="text" id="cari-siswa-kelas-input" class="form-control" placeholder="Ketik nama atau NISN..." oninput="filterSiswaKelasWaliTable()" style="width: 100%; min-width: 130px;">
           </div>
         </div>
         <div>
@@ -11736,9 +11997,9 @@ function renderLedgerNilaiWaliKelas(container) {
   container.innerHTML = `
     <div class="card" style="margin-bottom: 20px;">
       <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 14px;">
-        <div style="display: flex; align-items: center; gap: 12px;">
+        <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap; flex: 1 1 200px;">
           <label style="font-size: 0.76rem; font-weight: 700; color: var(--text-muted); display: block; margin-bottom: 4px;">PILIH KELAS BINAAN:</label>
-          <select class="form-control" style="font-weight: 600; min-width: 200px;" onchange="setWaliKelasClassId(this.value)">
+          <select class="form-control" style="font-weight: 600; width: 100%; min-width: 130px;" onchange="setWaliKelasClassId(this.value)">
             ${kelasOptions}
           </select>
         </div>
@@ -11856,9 +12117,9 @@ function renderCatatanWaliKelas(container) {
   container.innerHTML = `
     <div class="card" style="margin-bottom: 20px;">
       <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 14px;">
-        <div style="display: flex; align-items: center; gap: 12px;">
+        <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap; flex: 1 1 200px;">
           <label style="font-size: 0.76rem; font-weight: 700; color: var(--text-muted); display: block; margin-bottom: 4px;">PILIH KELAS BINAAN:</label>
-          <select class="form-control" style="font-weight: 600; min-width: 200px;" onchange="setWaliKelasClassId(this.value)">
+          <select class="form-control" style="font-weight: 600; width: 100%; min-width: 130px;" onchange="setWaliKelasClassId(this.value)">
             ${kelasOptions}
           </select>
         </div>
