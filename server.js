@@ -20,7 +20,8 @@ const MIME_TYPES = {
   '.woff': 'font/woff',
   '.woff2': 'font/woff2',
   '.ttf': 'font/ttf',
-  '.eot': 'application/vnd.ms-fontobject'
+  '.eot': 'application/vnd.ms-fontobject',
+  '.apk': 'application/vnd.android.package-archive'
 };
 
 const server = http.createServer((req, res) => {
@@ -36,23 +37,50 @@ const server = http.createServer((req, res) => {
   let filePath = path.join(ROOT, safePath);
 
   fs.stat(filePath, (err, stats) => {
+    let targetPath = filePath;
+    let targetStats = stats;
+
     if (err || !stats.isFile()) {
       // Fallback to index.html for client-side routing
-      filePath = path.join(ROOT, 'index.html');
-    }
-
-    const ext = path.extname(filePath).toLowerCase();
-    const contentType = MIME_TYPES[ext] || 'application/octet-stream';
-
-    fs.readFile(filePath, (readErr, content) => {
-      if (readErr) {
-        res.writeHead(500, { 'Content-Type': 'text/plain' });
-        res.end('500 Internal Server Error: ' + readErr.message);
+      targetPath = path.join(ROOT, 'index.html');
+      try {
+        targetStats = fs.statSync(targetPath);
+      } catch (e) {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('404 Not Found');
         return;
       }
-      res.writeHead(200, { 'Content-Type': contentType });
-      res.end(content);
+    }
+
+    const ext = path.extname(targetPath).toLowerCase();
+    const contentType = MIME_TYPES[ext] || 'application/octet-stream';
+    const headers = {
+      'Content-Type': contentType
+    };
+
+    if (targetStats && targetStats.size) {
+      headers['Content-Length'] = targetStats.size;
+    }
+
+    if (ext === '.apk') {
+      headers['Content-Disposition'] = 'attachment; filename="sman-saku.apk"';
+    }
+
+    if (req.method === 'HEAD') {
+      res.writeHead(200, headers);
+      res.end();
+      return;
+    }
+
+    res.writeHead(200, headers);
+    const stream = fs.createReadStream(targetPath);
+    stream.on('error', (streamErr) => {
+      if (!res.headersSent) {
+        res.writeHead(500, { 'Content-Type': 'text/plain' });
+      }
+      res.end('500 Error: ' + streamErr.message);
     });
+    stream.pipe(res);
   });
 });
 

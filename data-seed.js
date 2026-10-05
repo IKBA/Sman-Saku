@@ -46,7 +46,11 @@ const DEFAULT_SEEDS = {
   kontakWali: [],
   siswaAsuhan: [],
   jurnalBimbingan: [],
-  catatanWali: []
+  catatanWali: [],
+  layananBK: [],
+  peminatanKarirBK: [],
+  agendaBK: [],
+  kelasBimbinganBK: []
 };
 
 // Ekspor agar bisa diakses atau di-import

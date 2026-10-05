@@ -162,6 +162,12 @@
           <span>Rekap & Cetak</span>
         </a>
       </li>
+      <li data-page="akun" id="sidebar-item-akun" style="display: none;">
+        <a href="#akun" onclick="navigate('akun')">
+          <i class="fas fa-users-cog"></i>
+          <span>Kelola Akun</span>
+        </a>
+      </li>
       <li data-page="profil">
         <a href="#profil" onclick="navigate('profil')">
           <i class="fas fa-user-cog"></i>
@@ -243,6 +249,18 @@
                 <div class="item-desc">Pendampingan siswa asuhan lintas kelas, catatan bimbingan konseling & karakter.</div>
               </div>
             </button>
+            <button type="button" class="mode-dropdown-item" data-mode="gurubk" onclick="setAppMode('gurubk')">
+              <div class="item-icon-box gurubk">
+                <i class="fas fa-user-shield"></i>
+              </div>
+              <div class="item-content">
+                <div class="item-title-row">
+                  <span class="item-title">Mode Guru BK</span>
+                  <span class="item-badge gurubk">Konseling & Karir</span>
+                </div>
+                <div class="item-desc">Layanan konseling siswa, peta kerawanan, peminatan studi/karir, dan penanganan kasus khusus.</div>
+              </div>
+            </button>
           </div>
         </div>
 
@@ -253,9 +271,9 @@
             <span id="cloud-sync-text" class="cloud-sync-label">Cloud</span>
           </button>
 
-          <!-- Install PWA Button (Hidden by default, shown when installable) -->
-          <button id="btn-pwa-install" class="btn-pwa-install" style="display:none;" onclick="triggerPwaInstall()" title="Pasang Aplikasi Sman_Saku di HP">
-            <i class="fas fa-mobile-screen-button"></i>
+          <!-- Pasang App / Download APK Button -->
+          <button id="btn-pwa-install" class="btn-pwa-install" onclick="showDownloadApkModal()" title="Download & Pasang Aplikasi Android (APK)">
+            <i class="fab fa-android"></i>
             <span class="pwa-install-label">Pasang App</span>
           </button>
 

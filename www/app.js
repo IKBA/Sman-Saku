@@ -163,6 +163,17 @@ function getLocalDateString() {
   return `${yyyy}-${mm}-${dd}`;
 }
 
+// Global helper to safely escape HTML characters and prevent XSS/crashes
+function escapeHtml(str) {
+  if (str === null || str === undefined) return "";
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
 // ==========================================
 // AUTHENTICATION SYSTEM
 // ==========================================
@@ -184,45 +195,731 @@ const APP_BUILD_VERSION = "1.2.3_20261002";
   }
 })();
 
+const MASTER_CLASSES_KEY = "saku_guru_master_kelas";
+const MASTER_STUDENTS_KEY = "saku_guru_master_siswa";
+// Helper: Normalisasi gelar akademis dan tanda baca untuk pencocokan nama guru
+function normalizeTeacherName(str) {
+  if (!str) return "";
+  return str.toLowerCase()
+    .replace(/\b(dr|dra|drs|h|hj|prof|ir|kh)\b\.?/gi, "")
+    .replace(/,\s*(s\.pd|m\.pd|m\.si|s\.ag|s\.kom|s\.t|s\.sos|gr|m\.m|m\.kom|s\.e|s\.si)\.?/gi, "")
+    .replace(/[^\w\s]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// Helper: Normalisasi kode/nama kelas ("XII.A", "XII-A", "XII A" -> "XIIA")
+function normalizeClassName(str) {
+  if (!str) return "";
+  return str.toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
+// Helper: Evaluasi apakah sebuah kelas ditugaskan kepada user (email, nama, targetKelasId)
+function isUserMatchWali(k, userOrSession) {
+  if (!k || !userOrSession) return false;
+  const userEmail = (userOrSession.email || "").trim().toLowerCase();
+  const userNama = (userOrSession.nama || "").trim().toLowerCase();
+
+  // 1. Cocokkan email wali kelas
+  const waliEmail = (k.waliKelasEmail || "").trim().toLowerCase();
+  if (waliEmail && userEmail && waliEmail === userEmail) return true;
+
+  // 2. Cocokkan targetKelasId jika user memilikinya
+  if (userOrSession.kelasWaliId && String(k.id) === String(userOrSession.kelasWaliId)) return true;
+
+  // 3. Cocokkan nama lengkap wali kelas
+  const waliNama = (k.waliKelas || "").trim().toLowerCase();
+  if (!waliNama || waliNama === "belum diatur" || waliNama === "guru" || waliNama === "guru mapel") return false;
+  if (waliNama === userNama) return true;
+
+  // 4. Cocokkan nama setelah normalisasi gelar
+  const normWali = normalizeTeacherName(waliNama);
+  const normUser = normalizeTeacherName(userNama);
+  if (normWali && normUser) {
+    if (normWali === normUser) return true;
+    if (normWali.length >= 4 && normUser.length >= 4) {
+      if (normWali.includes(normUser) || normUser.includes(normWali)) return true;
+    }
+  }
+
+  return false;
+}
+
+// Helper: Ambil daftar kelas master sekolah dari berbagai sumber cache
+function getMasterClasses() {
+  // 1. Cek langsung dari key saku_guru_master_kelas
+  try {
+    const stored = localStorage.getItem(MASTER_CLASSES_KEY);
+    if (stored) {
+      const parsed = JSON.parse(stored);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
+  } catch(e) {}
+
+  // 2. Cek dari database akun Administrator (admin@smansaku.id atau akun admin lainnya)
+  try {
+    const adminKey = "saku_guru_db_admin_smansaku_id";
+    const adminData = localStorage.getItem(adminKey);
+    if (adminData) {
+      const parsed = JSON.parse(adminData);
+      if (parsed && Array.isArray(parsed.kelas) && parsed.kelas.length > 0) {
+        return parsed.kelas;
+      }
+    }
+
+    // Cari di semua key saku_guru_db_* jika ada yang memiliki kelas dengan penugasan wali
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith("saku_guru_db_")) {
+        const item = localStorage.getItem(key);
+        if (item) {
+          try {
+            const p = JSON.parse(item);
+            if (p && Array.isArray(p.kelas) && p.kelas.length > 0) {
+              if (p.kelas.some(k => k.waliKelasEmail)) return p.kelas;
+            }
+          } catch(err) {}
+        }
+      }
+    }
+  } catch(e) {}
+
+  // 3. Cek dari db.kelas saat ini jika ada
+  if (typeof db !== "undefined" && db && Array.isArray(db.kelas) && db.kelas.length > 0) {
+    return db.kelas;
+  }
+
+  // 4. Fallback ke seed data jika ada
+  if (typeof DEFAULT_SEEDS !== "undefined" && DEFAULT_SEEDS && Array.isArray(DEFAULT_SEEDS.kelas)) {
+    return DEFAULT_SEEDS.kelas;
+  }
+
+  return [];
+}
+
+// Helper: Ambil daftar kelas master langsung dari akun Administrator di cloud atau cache lokal
+async function fetchAdminMasterClasses() {
+  if (isCloudMode && supabase) {
+    try {
+      const { data, error } = await supabase
+        .from("saku_guru_databases")
+        .select("data")
+        .eq("email", "admin@smansaku.id")
+        .maybeSingle();
+
+      if (!error && data && data.data && Array.isArray(data.data.kelas) && data.data.kelas.length > 0) {
+        localStorage.setItem(MASTER_CLASSES_KEY, JSON.stringify(data.data.kelas));
+        if (Array.isArray(data.data.siswa) && data.data.siswa.length > 0) {
+          localStorage.setItem(MASTER_STUDENTS_KEY, JSON.stringify(data.data.siswa));
+        }
+        return data.data.kelas;
+      }
+    } catch (e) {
+      console.warn("fetchAdminMasterClasses cloud error:", e);
+    }
+  }
+  return getMasterClasses();
+}
+
+// Helper: Ambil daftar siswa master sekolah
+function getMasterStudents() {
+  try {
+    const stored = localStorage.getItem(MASTER_STUDENTS_KEY);
+    if (stored) {
+      const parsed = JSON.parse(stored);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
+    const adminKey = "saku_guru_db_admin_smansaku_id";
+    const adminData = localStorage.getItem(adminKey);
+    if (adminData) {
+      const parsed = JSON.parse(adminData);
+      if (parsed && Array.isArray(parsed.siswa) && parsed.siswa.length > 0) return parsed.siswa;
+    }
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith("saku_guru_db_")) {
+        const item = localStorage.getItem(key);
+        if (item) {
+          try {
+            const p = JSON.parse(item);
+            if (p && Array.isArray(p.siswa) && p.siswa.length > 0) return p.siswa;
+          } catch(err) {}
+        }
+      }
+    }
+  } catch(e) {}
+  if (typeof db !== "undefined" && db && Array.isArray(db.siswa) && db.siswa.length > 0) {
+    return db.siswa;
+  }
+  if (typeof DEFAULT_SEEDS !== "undefined" && DEFAULT_SEEDS && Array.isArray(DEFAULT_SEEDS.siswa)) {
+    return DEFAULT_SEEDS.siswa;
+  }
+  return [];
+}
+
+// Helper: Simpan daftar kelas master agar dapat diakses semua akun guru
+function saveMasterClasses(classes, students = null) {
+  if (!Array.isArray(classes) || classes.length === 0) return;
+  try {
+    localStorage.setItem(MASTER_CLASSES_KEY, JSON.stringify(classes));
+  } catch(e) {}
+
+  if (Array.isArray(students) && students.length > 0) {
+    try {
+      localStorage.setItem(MASTER_STUDENTS_KEY, JSON.stringify(students));
+    } catch(e) {}
+  }
+
+  // Sinkronkan ke database akun guru lain yang tersimpan di localStorage browser ini
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith("saku_guru_db_")) {
+        const item = localStorage.getItem(key);
+        if (item) {
+          try {
+            const userDb = JSON.parse(item);
+            if (userDb && typeof userDb === 'object') {
+              syncMasterDataToTeacher(userDb, classes);
+              localStorage.setItem(key, JSON.stringify(userDb));
+            }
+          } catch(err) {}
+        }
+      }
+    }
+  } catch(e) {}
+}
+
+// Helper: Distribusikan penetapan kelas dan wali kelas ke cloud Supabase dan database guru
+async function distributeMasterClassesToAllTeachers(classes, students = null) {
+  if (!Array.isArray(classes) || classes.length === 0) return;
+  saveMasterClasses(classes, students);
+
+  if (isCloudMode && supabase) {
+    try {
+      const assignedTeachers = classes.filter(k => k.waliKelasEmail).map(k => k.waliKelasEmail.trim().toLowerCase());
+      const uniqueEmails = [...new Set(assignedTeachers)];
+
+      for (const email of uniqueEmails) {
+        if (!email || email === "admin@smansaku.id") continue;
+        try {
+          const { data: row } = await supabase
+            .from("saku_guru_databases")
+            .select("data")
+            .eq("email", email)
+            .maybeSingle();
+
+          if (row && row.data && typeof row.data === 'object') {
+            const teacherDb = row.data;
+            const updated = syncMasterDataToTeacher(teacherDb, classes);
+            if (updated) {
+              teacherDb.last_updated = new Date().toISOString();
+              await supabase
+                .from("saku_guru_databases")
+                .update({ data: teacherDb, updated_at: new Date().toISOString() })
+                .eq("email", email);
+            }
+          }
+        } catch(err) {
+          console.warn(`Gagal mendistribusikan kelas ke ${email}:`, err);
+        }
+      }
+    } catch (e) {
+      console.warn("distributeMasterClassesToAllTeachers cloud error:", e);
+    }
+  }
+}
+
+function getUserKelasWaliIdFromStorage(email) {
+  if (!email) return "";
+  try {
+    const storedUsers = JSON.parse(localStorage.getItem(USERS_STORAGE_KEY) || "[]");
+    const u = storedUsers.find(x => x.email && x.email.trim().toLowerCase() === email.trim().toLowerCase());
+    return (u && u.kelasWaliId) ? String(u.kelasWaliId) : "";
+  } catch(e) { return ""; }
+}
+
+function ensureClassInCurrentDb(classObj) {
+  if (typeof db === "undefined" || !db || !classObj) return;
+  if (!Array.isArray(db.kelas)) db.kelas = [];
+  const normTarget = normalizeClassName(classObj.nama);
+  let existingIdx = db.kelas.findIndex(k => String(k.id) === String(classObj.id));
+  if (existingIdx === -1 && normTarget) {
+    existingIdx = db.kelas.findIndex(k => normalizeClassName(k.nama) === normTarget);
+  }
+
+  const masterStudents = getMasterStudents();
+  const masterClasses = getMasterClasses();
+  const relatedMaster = (masterClasses || []).find(mk => String(mk.id) === String(classObj.id) || (normTarget && normalizeClassName(mk.nama) === normTarget));
+  const relatedMasterId = relatedMaster ? relatedMaster.id : classObj.id;
+
+  if (existingIdx === -1) {
+    db.kelas.push({ ...classObj });
+    // Sinkronkan siswa untuk kelas ini dari master jika ada
+    if (Array.isArray(masterStudents) && masterStudents.length > 0) {
+      db.siswa = db.siswa || [];
+      const classStudents = masterStudents.filter(s => 
+        String(s.kelasId) === String(classObj.id) || 
+        String(s.kelasId) === String(relatedMasterId)
+      );
+      classStudents.forEach(cs => {
+        if (!db.siswa.some(s => String(s.id) === String(cs.id) || (s.nisn && s.nisn === cs.nisn))) {
+          db.siswa.push({ ...cs, kelasId: classObj.id });
+        }
+      });
+    }
+    try { saveDatabase(false); } catch(e) {}
+  } else {
+    let changed = false;
+    const oldId = db.kelas[existingIdx].id;
+    if (classObj.id && db.kelas[existingIdx].id !== classObj.id) {
+      db.kelas[existingIdx].id = classObj.id;
+      changed = true;
+      if (Array.isArray(db.siswa)) {
+        db.siswa.forEach(s => {
+          if (String(s.kelasId) === String(oldId)) {
+            s.kelasId = classObj.id;
+            changed = true;
+          }
+        });
+      }
+    }
+    if (classObj.waliKelasEmail && db.kelas[existingIdx].waliKelasEmail !== classObj.waliKelasEmail) {
+      db.kelas[existingIdx].waliKelasEmail = classObj.waliKelasEmail;
+      changed = true;
+    }
+    if (classObj.waliKelas && db.kelas[existingIdx].waliKelas !== classObj.waliKelas) {
+      db.kelas[existingIdx].waliKelas = classObj.waliKelas;
+      changed = true;
+    }
+    if (classObj.nama && db.kelas[existingIdx].nama !== classObj.nama) {
+      db.kelas[existingIdx].nama = classObj.nama;
+      changed = true;
+    }
+
+    // Pastikan siswa untuk kelas ini tersedia di db.siswa
+    const currentClassId = db.kelas[existingIdx].id;
+    const studentCount = (db.siswa || []).filter(s => String(s.kelasId) === String(currentClassId)).length;
+    if (studentCount === 0 && Array.isArray(masterStudents) && masterStudents.length > 0) {
+      db.siswa = db.siswa || [];
+      const classStudents = masterStudents.filter(s => 
+        String(s.kelasId) === String(currentClassId) || 
+        String(s.kelasId) === String(oldId) || 
+        String(s.kelasId) === String(relatedMasterId)
+      );
+      if (classStudents.length > 0) {
+        classStudents.forEach(cs => {
+          const existIdx = db.siswa.findIndex(s => String(s.id) === String(cs.id) || (s.nisn && s.nisn === cs.nisn));
+          if (existIdx >= 0) {
+            db.siswa[existIdx].kelasId = currentClassId;
+          } else {
+            db.siswa.push({ ...cs, kelasId: currentClassId });
+          }
+        });
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      try { saveDatabase(false); } catch(e) {}
+    }
+  }
+}
+
+function syncMasterDataToTeacher(targetDb, customMasterClasses = null) {
+  if (!targetDb || typeof targetDb !== 'object') return false;
+  const masterClasses = customMasterClasses || getMasterClasses();
+  let changed = false;
+
+  if (Array.isArray(masterClasses) && masterClasses.length > 0) {
+    targetDb.kelas = targetDb.kelas || [];
+    masterClasses.forEach(mk => {
+      const normMk = normalizeClassName(mk.nama);
+      let idx = targetDb.kelas.findIndex(k => String(k.id) === String(mk.id));
+      if (idx === -1 && normMk) {
+        idx = targetDb.kelas.findIndex(k => normalizeClassName(k.nama) === normMk);
+      }
+
+      if (idx === -1) {
+        targetDb.kelas.push({ ...mk });
+        changed = true;
+      } else {
+        const oldId = targetDb.kelas[idx].id;
+        if (mk.id && targetDb.kelas[idx].id !== mk.id) {
+          targetDb.kelas[idx].id = mk.id;
+          changed = true;
+          // Perbarui kelasId siswa yang mengacu pada oldId
+          if (Array.isArray(targetDb.siswa)) {
+            targetDb.siswa.forEach(s => {
+              if (String(s.kelasId) === String(oldId)) {
+                s.kelasId = mk.id;
+              }
+            });
+          }
+        }
+        if (mk.waliKelasEmail && targetDb.kelas[idx].waliKelasEmail !== mk.waliKelasEmail) {
+          targetDb.kelas[idx].waliKelasEmail = mk.waliKelasEmail;
+          changed = true;
+        }
+        if (mk.waliKelas && targetDb.kelas[idx].waliKelas !== mk.waliKelas) {
+          targetDb.kelas[idx].waliKelas = mk.waliKelas;
+          changed = true;
+        }
+        if (mk.nama && targetDb.kelas[idx].nama !== mk.nama) {
+          targetDb.kelas[idx].nama = mk.nama;
+          changed = true;
+        }
+      }
+    });
+  }
+
+  const masterStudents = getMasterStudents();
+  if (Array.isArray(masterStudents) && masterStudents.length > 0) {
+    if (!targetDb.siswa || targetDb.siswa.length === 0 || targetDb.is_demo) {
+      targetDb.siswa = masterStudents;
+      changed = true;
+    } else {
+      // 1. Hubungkan kembali siswa yang kelasId-nya terputus
+      const masterStudentToClass = {};
+      masterStudents.forEach(ms => {
+        if (ms.id && ms.kelasId) masterStudentToClass[ms.id] = ms.kelasId;
+        if (ms.nisn && ms.kelasId) masterStudentToClass['nisn_' + ms.nisn] = ms.kelasId;
+      });
+
+      targetDb.siswa.forEach(s => {
+        const existsInTarget = (targetDb.kelas || []).some(k => String(k.id) === String(s.kelasId));
+        if (!existsInTarget) {
+          const canonicalClassId = masterStudentToClass[s.id] || (s.nisn ? masterStudentToClass['nisn_' + s.nisn] : null);
+          if (canonicalClassId) {
+            s.kelasId = canonicalClassId;
+            changed = true;
+          }
+        }
+      });
+
+      // 2. Pastikan setiap kelas di targetDb memiliki daftar siswa dari masterStudents jika kosong
+      (targetDb.kelas || []).forEach(k => {
+        const count = targetDb.siswa.filter(s => String(s.kelasId) === String(k.id)).length;
+        if (count === 0) {
+          const normK = normalizeClassName(k.nama);
+          const masterK = (masterClasses || []).find(mk => String(mk.id) === String(k.id) || (normK && normalizeClassName(mk.nama) === normK));
+          const masterKId = masterK ? masterK.id : k.id;
+
+          const toAdd = masterStudents.filter(s => String(s.kelasId) === String(masterKId) || String(s.kelasId) === String(k.id));
+          if (toAdd.length > 0) {
+            toAdd.forEach(st => {
+              const existIdx = targetDb.siswa.findIndex(s => String(s.id) === String(st.id) || (s.nisn && s.nisn === st.nisn));
+              if (existIdx >= 0) {
+                targetDb.siswa[existIdx].kelasId = k.id;
+              } else {
+                targetDb.siswa.push({ ...st, kelasId: k.id });
+              }
+              changed = true;
+            });
+          }
+        }
+      });
+    }
+  }
+
+  // 3. Sinkronkan siswa asuhan otomatis jika user adalah wali kelas dan siswaAsuhan masih kosong
+  const teacherEmail = (targetDb.email || (targetDb.guruProfile && targetDb.guruProfile.email) || "").toLowerCase();
+  if (teacherEmail) {
+    const assignedK = (targetDb.kelas || []).find(k => k.waliKelasEmail && k.waliKelasEmail.toLowerCase() === teacherEmail);
+    if (assignedK && Array.isArray(targetDb.siswa)) {
+      const classStudents = targetDb.siswa.filter(s => String(s.kelasId) === String(assignedK.id));
+      if (classStudents.length > 0) {
+        if (!Array.isArray(targetDb.siswaAsuhan) || targetDb.siswaAsuhan.length === 0) {
+          targetDb.siswaAsuhan = classStudents.map(s => s.id);
+          changed = true;
+        }
+      }
+    }
+  }
+
+  return changed;
+}
+
+// Helper: Ambil siswa untuk suatu kelas secara tangguh (dengan pencocokan nama & master import)
+function getStudentsForClass(classId) {
+  if (!classId) return [];
+  if (typeof db === "undefined" || !db) return [];
+  db.siswa = db.siswa || [];
+
+  // 1. Pencocokan langsung dengan classId
+  let students = db.siswa.filter(s => String(s.kelasId) === String(classId));
+  if (students.length > 0) return students;
+
+  // 2. Temukan objek kelas dari db lokal atau master kelas
+  const masterClasses = getMasterClasses() || [];
+  const targetClass = (db.kelas || []).find(k => String(k.id) === String(classId)) ||
+                      masterClasses.find(k => String(k.id) === String(classId));
+
+  const normClassName = targetClass ? normalizeClassName(targetClass.nama) : null;
+  const relatedIds = new Set();
+  relatedIds.add(String(classId));
+
+  if (normClassName) {
+    (db.kelas || []).forEach(k => {
+      if (normalizeClassName(k.nama) === normClassName) relatedIds.add(String(k.id));
+    });
+    masterClasses.forEach(mk => {
+      if (normalizeClassName(mk.nama) === normClassName) relatedIds.add(String(mk.id));
+    });
+
+    // Periksa apakah ada siswa di db.siswa yang memiliki salah satu id kelas terkait
+    let healed = false;
+    db.siswa.forEach(s => {
+      if (s.kelasId && relatedIds.has(String(s.kelasId))) {
+        if (String(s.kelasId) !== String(classId)) {
+          s.kelasId = classId;
+          healed = true;
+        }
+      }
+    });
+
+    students = db.siswa.filter(s => String(s.kelasId) === String(classId));
+    if (students.length > 0) {
+      if (healed) {
+        try { saveDatabase(false); } catch(e) {}
+      }
+      return students;
+    }
+
+    // 3. Fallback: Ambil dari masterStudents sekolah
+    const masterStudents = getMasterStudents();
+    if (Array.isArray(masterStudents) && masterStudents.length > 0) {
+      const candidates = masterStudents.filter(s => s.kelasId && relatedIds.has(String(s.kelasId)));
+      if (candidates.length > 0) {
+        let imported = false;
+        candidates.forEach(cs => {
+          const existIdx = db.siswa.findIndex(s => String(s.id) === String(cs.id) || (s.nisn && s.nisn === cs.nisn));
+          if (existIdx >= 0) {
+            db.siswa[existIdx].kelasId = classId;
+            imported = true;
+          } else {
+            db.siswa.push({ ...cs, kelasId: classId });
+            imported = true;
+          }
+        });
+        if (imported) {
+          try { saveDatabase(false); } catch(e) {}
+        }
+        students = db.siswa.filter(s => String(s.kelasId) === String(classId));
+        if (students.length > 0) return students;
+      }
+    }
+  }
+
+  return students;
+}
+
 // Default admin-registered users (email + password)
 async function getRegisteredUsers() {
+  let users = null;
   if (isCloudMode && supabase) {
     try {
       const { data, error } = await supabase.from("saku_guru_users").select("*");
-      if (!error && data && data.length > 0) return data;
+      if (!error && data && data.length > 0) users = data;
     } catch(e) { console.warn("Supabase getRegisteredUsers error:", e); }
   }
-  // Fallback to localStorage
+
+  // Ambil cache lokal pengguna
+  let localUsers = [];
   const stored = localStorage.getItem(USERS_STORAGE_KEY);
   if (stored) {
-    try { return JSON.parse(stored); } catch(e) { /* fall through */ }
+    try { localUsers = JSON.parse(stored); } catch(e) {}
   }
+
+  // Jika data diambil dari cloud, pertahankan kelasWaliId dari lokal agar tidak terhapus
+  if (users && Array.isArray(users) && localUsers && localUsers.length > 0) {
+    users = users.map(u => {
+      const localMatch = localUsers.find(lu => lu.email && lu.email.toLowerCase() === (u.email || "").toLowerCase());
+      return {
+        ...u,
+        kelasWaliId: u.kelasWaliId || (localMatch ? localMatch.kelasWaliId : undefined)
+      };
+    });
+  } else if (!users) {
+    users = localUsers;
+  }
+
   // Default users seeded by administrator (with offline teacher accounts)
   const defaultUsers = [
     { email: "admin@smansaku.id", password: "admin123", nama: "Administrator Sman_Saku", role: "admin" },
     { email: "kamria@smansaku.id", password: "@kamria123", nama: "Dr. Kamria, S.Pd., M.Si", role: "admin" },
-    { email: "ikbar@smansaku.id", password: "r@bk10812", nama: "Muh. Ikbar, S.Pd., Gr", role: "guru" }
+    { email: "ikbar@smansaku.id", password: "r@bk10812", nama: "Muh. Ikbar, S.Pd., Gr", role: "guru_bk" },
+    { email: "guru@smansaku.id", password: "guru123", nama: "Guru Mata Pelajaran, S.Pd.", role: "guru" }
   ];
-  localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(defaultUsers));
-  return defaultUsers;
+
+  if (!users || !Array.isArray(users) || users.length === 0) {
+    localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(defaultUsers));
+    return defaultUsers;
+  }
+
+  // Ensure default demo accounts exist if missing, but NEVER override custom roles set by admin
+  let changed = false;
+  const ikbarUser = users.find(u => u.email.toLowerCase() === "ikbar@smansaku.id");
+  if (!ikbarUser) {
+    users.push({ email: "ikbar@smansaku.id", password: "r@bk10812", nama: "Muh. Ikbar, S.Pd., Gr", role: "guru_bk" });
+    changed = true;
+  }
+
+  const guruUser = users.find(u => u.email.toLowerCase() === "guru@smansaku.id");
+  if (!guruUser) {
+    users.push({ email: "guru@smansaku.id", password: "guru123", nama: "Guru Mata Pelajaran, S.Pd.", role: "guru" });
+    changed = true;
+  }
+
+  if (changed) {
+    localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(users));
+  }
+  return users;
 }
 
 async function saveRegisteredUsers(users) {
   // Always save to localStorage as cache/fallback
   localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(users));
-  // No direct batch-save to Supabase here; individual operations handle cloud saves
+}
+
+function getAssignedWaliKelas(session) {
+  if (!session || !session.email) return null;
+  const email = (session.email || "").trim().toLowerCase();
+  const nama = (session.nama || "").trim().toLowerCase();
+
+  const userStoredWaliId = getUserKelasWaliIdFromStorage(email);
+  const targetKelasId = session.kelasWaliId ? String(session.kelasWaliId) : userStoredWaliId;
+
+  // Kumpulkan semua sumber kelas: master kelas sekolah (prioritas utama) dan db.kelas lokal
+  const masterClasses = getMasterClasses();
+  const localClasses = (typeof db !== "undefined" && db && Array.isArray(db.kelas)) ? db.kelas : [];
+  
+  // Gabungkan kelas: Master kelas memiliki prioritas tertinggi untuk data penugasan wali kelas
+  const allAvailableClasses = [];
+  masterClasses.forEach(mk => {
+    allAvailableClasses.push({ ...mk });
+  });
+
+  localClasses.forEach(lk => {
+    const normLk = normalizeClassName(lk.nama);
+    const existing = allAvailableClasses.find(k => String(k.id) === String(lk.id) || (normLk && normalizeClassName(k.nama) === normLk));
+    if (existing) {
+      if (!existing.waliKelasEmail && lk.waliKelasEmail) existing.waliKelasEmail = lk.waliKelasEmail;
+      if (!existing.waliKelas && lk.waliKelas) existing.waliKelas = lk.waliKelas;
+    } else {
+      allAvailableClasses.push({ ...lk });
+    }
+  });
+
+  // 1. Cocokkan dengan pencocok komprehensif (Email, Target ID, Nama Lengkap & Gelar)
+  let match = allAvailableClasses.find(k => isUserMatchWali(k, session));
+  if (match) {
+    if (!session.kelasWaliId || String(session.kelasWaliId) !== String(match.id)) {
+      session.kelasWaliId = match.id;
+      setSession(session);
+    }
+    ensureClassInCurrentDb(match);
+    return match;
+  }
+
+  // 2. Cocokkan eksplisit berdasarkan waliKelasEmail
+  match = allAvailableClasses.find(k => k.waliKelasEmail && k.waliKelasEmail.trim().toLowerCase() === email);
+  if (match) {
+    if (!session.kelasWaliId || String(session.kelasWaliId) !== String(match.id)) {
+      session.kelasWaliId = match.id;
+      setSession(session);
+    }
+    ensureClassInCurrentDb(match);
+    return match;
+  }
+
+  // 3. Cocokkan berdasarkan targetKelasId (dari session atau USERS_STORAGE_KEY)
+  if (targetKelasId) {
+    match = allAvailableClasses.find(k => String(k.id) === targetKelasId);
+    if (match) {
+      if (!session.kelasWaliId) {
+        session.kelasWaliId = match.id;
+        setSession(session);
+      }
+      ensureClassInCurrentDb(match);
+      return match;
+    }
+  }
+
+  // 4. Jika user memiliki targetKelasId namun belum ada detail kelas di daftar:
+  if (targetKelasId) {
+    const syntheticClass = {
+      id: targetKelasId,
+      nama: "Kelas Binaan",
+      waliKelas: session.nama || "Wali Kelas",
+      waliKelasEmail: email
+    };
+    ensureClassInCurrentDb(syntheticClass);
+    return syntheticClass;
+  }
+
+  return null;
+}
+
+function isUserWaliKelas(session) {
+  if (!session) return false;
+  if (session.role === "admin") return true; // Administrator memiliki hak akses supervisi ke semua mode
+  if (session.role === "guru_bk") return false; // Akun Guru BK tidak memiliki mode wali kelas
+
+  // Cek apakah ada penetapan kelasWaliId di session atau USERS_STORAGE_KEY
+  if (session.kelasWaliId) return true;
+  const email = (session.email || "").trim().toLowerCase();
+  if (getUserKelasWaliIdFromStorage(email)) return true;
+
+  return getAssignedWaliKelas(session) !== null;
+}
+
+function getAllowedModesForRole(role, session = null) {
+  if (!session) session = getSession();
+
+  if (role === "guru_bk") {
+    // Akun Guru BK HANYA memiliki akses ke Mode Guru BK dan Mode Guru Wali
+    return ["gurubk", "guruwali"];
+  }
+
+  if (role === "admin") {
+    // Administrator selalu memiliki akses ke seluruh mode
+    return ["mapel", "walikelas", "guruwali", "gurubk"];
+  }
+
+  // Akun Guru Biasa:
+  // Cek apakah akun guru ini teridentifikasi sebagai Wali Kelas oleh Administrator
+  const isWali = isUserWaliKelas(session);
+  if (isWali) {
+    // Guru yang teridentifikasi sebagai Wali Kelas: Mode Guru Mapel, Mode Wali Kelas, Mode Guru Wali
+    return ["mapel", "walikelas", "guruwali"];
+  } else {
+    // Guru yang BUKAN Wali Kelas: Mode Wali Kelas TIDAK MUNCUL! Hanya Mode Mapel & Mode Guru Wali
+    return ["mapel", "guruwali"];
+  }
 }
 
 function getSession() {
   const data = localStorage.getItem(AUTH_STORAGE_KEY);
   if (data) {
-    try { return JSON.parse(data); } catch(e) { return null; }
+    try {
+      return JSON.parse(data);
+    } catch(e) { return null; }
   }
   return null;
 }
 
 function setSession(user) {
-  localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify({ email: user.email, nama: user.nama, role: user.role, loginAt: new Date().toISOString() }));
+  const sessionObj = {
+    email: user.email,
+    nama: user.nama,
+    role: user.role,
+    loginAt: user.loginAt || new Date().toISOString()
+  };
+  if (user.kelasWaliId) {
+    sessionObj.kelasWaliId = user.kelasWaliId;
+  }
+  localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(sessionObj));
 }
 
 function clearSession() {
@@ -274,6 +971,23 @@ async function handleLogin(event) {
 
     // Success
     errorEl.style.display = "none";
+
+    // Pastikan kelasWaliId ikut tersimpan di matchedUser jika akun ditugaskan sebagai wali kelas
+    try {
+      const masterClasses = await fetchAdminMasterClasses();
+      const assignedK = (masterClasses || []).find(k => isUserMatchWali(k, matchedUser));
+      if (assignedK) {
+        matchedUser.kelasWaliId = assignedK.id;
+      } else {
+        const storedWaliId = getUserKelasWaliIdFromStorage(email);
+        if (storedWaliId) {
+          matchedUser.kelasWaliId = storedWaliId;
+        }
+      }
+    } catch(err) {
+      console.warn("Wali assignment detection error during login:", err);
+    }
+
     setSession(matchedUser);
     await showApp();
   } catch(e) {
@@ -318,13 +1032,23 @@ async function showApp() {
   // Initialize app
   await initDatabase();
   initTheme();
+
+  // Sinkronkan kembali session dengan penugasan wali kelas setelah database siap
+  const session = getSession();
+  if (session && session.role !== "admin") {
+    const assignedClass = getAssignedWaliKelas(session);
+    if (assignedClass && session.kelasWaliId !== assignedClass.id) {
+      session.kelasWaliId = assignedClass.id;
+      setSession(session);
+    }
+  }
+
   initAppMode();
   initRouter();
   updateHeaderProfile();
   updateCloudSyncUI(isCloudMode ? "synced" : "offline");
 
   // Auto sync contacts from Administrator if this is a teacher account
-  const session = getSession();
   if (session && session.role !== "admin" && isCloudMode && supabase) {
     syncAdminContactsToTeacher(db, getCurrentSchoolName(), false).catch(e => console.warn(e));
   }
@@ -369,30 +1093,179 @@ window.addEventListener("beforeinstallprompt", (e) => {
   e.preventDefault();
   deferredInstallPrompt = e;
   const pwaBtn = document.getElementById("btn-pwa-install");
-  if (pwaBtn) pwaBtn.style.display = "inline-flex";
+  if (pwaBtn && (!window.Capacitor || !window.Capacitor.isNativePlatform || !window.Capacitor.isNativePlatform())) {
+    pwaBtn.style.display = "inline-flex";
+  }
 });
 
 window.addEventListener("appinstalled", () => {
   deferredInstallPrompt = null;
-  const pwaBtn = document.getElementById("btn-pwa-install");
-  if (pwaBtn) pwaBtn.style.display = "none";
   showToast("Aplikasi Sman_Saku berhasil dipasang!");
 });
 
-function triggerPwaInstall() {
+// Hide install/download button if already running inside Capacitor Android native app
+document.addEventListener("DOMContentLoaded", () => {
+  if (window.Capacitor && typeof window.Capacitor.isNativePlatform === 'function' && window.Capacitor.isNativePlatform()) {
+    const pwaBtn = document.getElementById("btn-pwa-install");
+    if (pwaBtn) pwaBtn.style.display = "none";
+  }
+});
+
+function showDownloadApkModal() {
+  const bodyHtml = `
+    <div class="apk-download-container">
+      <!-- Hero Card -->
+      <div class="apk-hero-card">
+        <div class="apk-icon-circle">
+          <i class="fab fa-android"></i>
+        </div>
+        <div class="apk-hero-info">
+          <h4 class="apk-title">Sman_Saku untuk Android</h4>
+          <div class="apk-meta-badges">
+            <span class="apk-badge apk-badge-success"><i class="fas fa-check-circle"></i> Versi 1.0.0</span>
+            <span class="apk-badge"><i class="fas fa-file-arrow-down"></i> ~7.1 MB (APK)</span>
+            <span class="apk-badge"><i class="fas fa-mobile-screen"></i> Android 7.0+</span>
+          </div>
+          <p class="apk-desc">Aplikasi administrasi guru terpadu dalam genggaman: absen siswa, penilaian, jurnal mengajar harian, dan pantauan kelas langsung di smartphone.</p>
+        </div>
+      </div>
+
+      <!-- Action Box: Download APK -->
+      <div class="apk-action-box">
+        <button type="button" id="btn-modal-dl-apk" class="btn-download-apk-main" onclick="downloadApkFile()">
+          <i class="fas fa-download fa-lg"></i>
+          <span>Unduh File APK Android (7.1 MB)</span>
+        </button>
+        <div class="apk-sub-actions">
+          <button type="button" class="btn-sub-action" onclick="copyApkDownloadLink()" title="Salin tautan langsung unduh APK">
+            <i class="fas fa-link"></i> Salin Link Download
+          </button>
+          <button type="button" class="btn-sub-action" onclick="shareApkLinkWA()" title="Kirim tautan APK ke WhatsApp">
+            <i class="fab fa-whatsapp" style="color:#25d366;"></i> Kirim ke WhatsApp
+          </button>
+        </div>
+      </div>
+
+      <!-- Step-by-Step Installation Guide -->
+      <div class="apk-guide-card">
+        <h5 class="guide-title"><i class="fas fa-list-check" style="color:var(--primary);"></i> 4 Langkah Mudah Pasang di HP Android:</h5>
+        
+        <div class="guide-step-item">
+          <div class="step-num">1</div>
+          <div class="step-content">
+            <strong>Unduh File APK</strong>
+            <p>Klik tombol hijau <em>"Unduh File APK Android"</em> di atas. File <code>sman-saku.apk</code> akan otomatis diunduh ke HP Anda.</p>
+          </div>
+        </div>
+
+        <div class="guide-step-item">
+          <div class="step-num">2</div>
+          <div class="step-content">
+            <strong>Buka File Hasil Unduhan</strong>
+            <p>Tarik bilah notifikasi HP Anda lalu ketuk file unduhan selesai, atau buka aplikasi <strong>Pengelola File (File Manager) &gt; folder Unduhan (Download)</strong>.</p>
+          </div>
+        </div>
+
+        <div class="guide-step-item">
+          <div class="step-num">3</div>
+          <div class="step-content">
+            <strong>Izinkan Penginstalan dari Sumber Ini</strong>
+            <p>Jika muncul notifikasi keamanan Android <em>"File mungkin berbahaya"</em>, pilih <strong>Tetap Download</strong>. Saat proses pasang, aktifkan izin <strong>"Izinkan dari sumber ini"</strong> pada Setelan HP.</p>
+          </div>
+        </div>
+
+        <div class="guide-step-item">
+          <div class="step-num">4</div>
+          <div class="step-content">
+            <strong>Ketuk Pasang (Install)</strong>
+            <p>Pilih tombol <strong>Pasang (Install)</strong> dan tunggu beberapa saat. Ikon aplikasi Sman_Saku akan langsung muncul di layar utama smartphone Anda!</p>
+          </div>
+        </div>
+      </div>
+
+      ${deferredInstallPrompt ? `
+      <div class="apk-pwa-option">
+        <div style="display:flex; align-items:center; gap:8px;">
+          <i class="fas fa-bolt" style="color:#f59e0b;"></i>
+          <span>Atau pasang instan tanpa download APK:</span>
+        </div>
+        <button type="button" class="btn-pwa-inline" onclick="triggerNativePwaInstall()">Pasang Web App (PWA)</button>
+      </div>
+      ` : ''}
+    </div>
+  `;
+
+  const footerHtml = `
+    <button type="button" class="btn btn-secondary" onclick="closeModal()">Tutup</button>
+  `;
+
+  openModal("Pasang Aplikasi Sman_Saku (Android)", bodyHtml, footerHtml, false);
+  const modalContent = document.querySelector("#app-modal .modal-content");
+  if (modalContent) {
+    modalContent.classList.add("modal-apk");
+  }
+}
+
+function downloadApkFile() {
+  const downloadUrl = "sman-saku.apk";
+  const link = document.createElement("a");
+  link.href = downloadUrl;
+  link.setAttribute("download", "sman-saku.apk");
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+
+  const dlBtn = document.getElementById("btn-modal-dl-apk");
+  if (dlBtn) {
+    dlBtn.innerHTML = '<i class="fas fa-check-circle fa-lg"></i> <span>Sedang Mengunduh... Cek Bilah Notifikasi</span>';
+    dlBtn.classList.add("downloading");
+    setTimeout(() => {
+      if (dlBtn) {
+        dlBtn.innerHTML = '<i class="fas fa-download fa-lg"></i> <span>Unduh Ulang File APK (7.1 MB)</span>';
+        dlBtn.classList.remove("downloading");
+      }
+    }, 4000);
+  }
+
+  showToast("Unduhan dimulai! File sman-saku.apk sedang diunduh.");
+}
+
+function copyApkDownloadLink() {
+  const fullUrl = new URL("sman-saku.apk", window.location.href).href;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(fullUrl).then(() => {
+      showToast("Tautan download APK berhasil disalin!");
+    }).catch(() => {
+      prompt("Salin tautan download APK berikut:", fullUrl);
+    });
+  } else {
+    prompt("Salin tautan download APK berikut:", fullUrl);
+  }
+}
+
+function shareApkLinkWA() {
+  const fullUrl = new URL("sman-saku.apk", window.location.href).href;
+  const text = `Halo Bapak/Ibu Guru, silakan download dan pasang aplikasi Sman_Saku (Android) melalui tautan resmi berikut:\n${fullUrl}\n\nSetelah selesai diunduh, buka file sman-saku.apk lalu ketuk 'Pasang' / 'Install' untuk menggunakan aplikasi di HP.`;
+  const waUrl = "https://api.whatsapp.com/send?text=" + encodeURIComponent(text);
+  window.open(waUrl, "_blank");
+}
+
+function triggerNativePwaInstall() {
   if (deferredInstallPrompt) {
     deferredInstallPrompt.prompt();
     deferredInstallPrompt.userChoice.then((choice) => {
       if (choice.outcome === "accepted") {
         console.log("[PWA] User accepted installation prompt");
+        showToast("Aplikasi Sman_Saku berhasil dipasang!");
+        closeModal();
       }
       deferredInstallPrompt = null;
-      const pwaBtn = document.getElementById("btn-pwa-install");
-      if (pwaBtn) pwaBtn.style.display = "none";
     });
-  } else {
-    alert("Untuk memasang aplikasi Sman_Saku di HP:\nBuka menu browser Anda (titik tiga di kanan atas) lalu pilih 'Tambahkan ke Layar Utama' atau 'Install Aplikasi'.");
   }
+}
+
+function triggerPwaInstall() {
+  showDownloadApkModal();
 }
 
 // Get Database Key based on email session
@@ -504,6 +1377,14 @@ function cleanupLegacyDuplicateData(targetDb) {
 
 // Database Initialization
 async function initDatabase() {
+  // 0. Ambil data master kelas sekolah dari Administrator (cloud atau local cache)
+  let masterClasses = null;
+  try {
+    masterClasses = await fetchAdminMasterClasses();
+  } catch(e) {
+    masterClasses = getMasterClasses();
+  }
+
   // 1. Load local data first as baseline/fallback
   const dbKey = getDbKey();
   const localData = localStorage.getItem(dbKey);
@@ -542,6 +1423,7 @@ async function initDatabase() {
           await loadSeedData();
         }
         cleanupLegacyDuplicateData(db);
+        syncMasterDataToTeacher(db, masterClasses);
         updateHeaderProfile();
         return;
       }
@@ -583,6 +1465,7 @@ async function initDatabase() {
                 console.log("Local database is demo data but cloud database is real. Syncing cloud to local instead.");
                 db = cloudDb;
                 cleanupLegacyDuplicateData(db);
+                syncMasterDataToTeacher(db, masterClasses);
                 try {
                   localStorage.setItem(dbKey, JSON.stringify(db));
                 } catch(e) {
@@ -596,6 +1479,7 @@ async function initDatabase() {
                 console.log("Local database is newer than cloud. Syncing local to cloud.");
                 db = localDb;
                 cleanupLegacyDuplicateData(db);
+                syncMasterDataToTeacher(db, masterClasses);
                 await saveDatabase(false); // Upload local to cloud (no new mutation)
                 updateHeaderProfile();
                 return;
@@ -605,6 +1489,7 @@ async function initDatabase() {
             console.log("Cloud database loaded and synchronized to local.");
             db = cloudDb;
             cleanupLegacyDuplicateData(db);
+            syncMasterDataToTeacher(db, masterClasses);
             // Sync to local cache
             try {
               localStorage.setItem(dbKey, JSON.stringify(db));
@@ -621,6 +1506,7 @@ async function initDatabase() {
           console.log("No valid cloud database found, but local database exists. Syncing local to cloud.");
           db = localDb;
           cleanupLegacyDuplicateData(db);
+          syncMasterDataToTeacher(db, masterClasses);
           await saveDatabase(false); // upload baseline only
           updateHeaderProfile();
           return;
@@ -629,6 +1515,7 @@ async function initDatabase() {
         // No cloud data, no local data: load seeds
         await loadSeedData();
         cleanupLegacyDuplicateData(db);
+        syncMasterDataToTeacher(db, masterClasses);
         updateHeaderProfile();
         return;
       } else {
@@ -639,6 +1526,7 @@ async function initDatabase() {
           await loadSeedData();
         }
         cleanupLegacyDuplicateData(db);
+        syncMasterDataToTeacher(db, masterClasses);
         updateHeaderProfile();
         return;
       }
@@ -654,6 +1542,7 @@ async function initDatabase() {
     await loadSeedData();
   }
   cleanupLegacyDuplicateData(db);
+  syncMasterDataToTeacher(db, masterClasses);
   updateHeaderProfile();
 }
 
@@ -682,6 +1571,12 @@ async function saveDatabase(isMutation = true) {
 
   // Add modified timestamp
   db.last_updated = new Date().toISOString();
+
+  // If administrator modifies data, update master classes and students cache
+  const session = getSession();
+  if (session && session.role === "admin" && db && Array.isArray(db.kelas)) {
+    saveMasterClasses(db.kelas, db.siswa);
+  }
 
   // Always save locally as cache
   const dbKey = getDbKey();
@@ -1065,7 +1960,7 @@ function closeModal() {
   modal.classList.remove("show");
   const modalContent = modal.querySelector(".modal-content");
   if (modalContent) {
-    modalContent.classList.remove("modal-lg");
+    modalContent.classList.remove("modal-lg", "modal-apk");
   }
 }
 
@@ -1088,11 +1983,45 @@ function renderPage(pageId) {
         titleEl.textContent = "Dashboard Guru Wali";
         subtitleEl.textContent = "Pendampingan siswa asuhan, catatan bimbingan konseling, dan pemantauan karakter.";
         renderDashboardGuruWali(container);
+      } else if (currentAppMode === "gurubk") {
+        titleEl.textContent = "Dashboard Guru BK";
+        subtitleEl.textContent = "Pusat bimbingan konseling, pemantauan kasus siswa, dan pendampingan karir.";
+        renderDashboardGuruBK(container);
       } else {
         titleEl.textContent = "Dashboard";
         subtitleEl.textContent = "Ringkasan aktivitas dan administrasi Anda hari ini.";
         renderDashboard(container);
       }
+      break;
+    case "kelas_bimbingan":
+      titleEl.textContent = "Kelas yang Dibimbing (Binaan BK)";
+      subtitleEl.textContent = "Kelola rombongan belajar / tingkat kelas yang menjadi tanggung jawab bimbingan dan konseling.";
+      renderKelasBimbinganBK(container);
+      break;
+    case "konseling_bk":
+      titleEl.textContent = "Layanan Bimbingan & Konseling";
+      subtitleEl.textContent = "Pencatatan sesi konseling individu, kelompok, klasikal, dan penanganan siswa.";
+      renderKonselingBK(container);
+      break;
+    case "peta_kerawanan":
+      titleEl.textContent = "Peta Kerawanan Siswa";
+      subtitleEl.textContent = "Deteksi dini kerawanan siswa terpadu dari absensi, catatan disiplin, dan kendala belajar.";
+      renderPetaKerawananBK(container);
+      break;
+    case "karir_bk":
+      titleEl.textContent = "Peminatan & Perencanaan Karir Siswa";
+      subtitleEl.textContent = "Database rencana studi lanjut (PTN/PTS/Kedinasan), jalur masuk, dan minat bakat siswa.";
+      renderPeminatanKarirBK(container);
+      break;
+    case "agenda_bk":
+      titleEl.textContent = "Agenda & Janji Temu Konseling";
+      subtitleEl.textContent = "Jadwal konsultasi siswa, pemanggilan orang tua, dan kunjungan rumah (home visit).";
+      renderAgendaBK(container);
+      break;
+    case "rekap_bk":
+      titleEl.textContent = "Rekapitulasi & Laporan Resmi BK";
+      subtitleEl.textContent = "Laporan berkala pelaksanaan bimbingan konseling dan format cetak administrasi BK.";
+      renderRekapLaporanBK(container);
       break;
     case "rekap_final":
       titleEl.textContent = "Rekap Presensi Final Kelas";
@@ -1173,6 +2102,11 @@ function renderPage(pageId) {
       titleEl.textContent = "Rekap & Cetak";
       subtitleEl.textContent = "Ekspor laporan rekapitulasi ke Excel (CSV) atau cetak PDF.";
       renderRekap(container);
+      break;
+    case "akun":
+      titleEl.textContent = "Kelola Akun";
+      subtitleEl.textContent = "Kelola data akun guru, password, dan penugasan wali kelas.";
+      renderManajemenAkun(container);
       break;
     case "profil":
       titleEl.textContent = "Profil";
@@ -1448,7 +2382,7 @@ function renderDashboardIntervention(targetDate = null) {
   if (mode === "walikelas") {
     const classId = getWaliKelasClassId();
     activeKelasObj = (db.kelas || []).find(k => k.id === classId) || { nama: "Kelas", tingkat: "-" };
-    const classStudents = (db.siswa || []).filter(s => s.kelasId === classId);
+    const classStudents = getStudentsForClass(classId);
     scopedStudentIds = classStudents.map(s => s.id);
   } else if (mode === "guruwali") {
     const asuhanList = getSiswaAsuhanList();
@@ -1549,6 +2483,13 @@ function renderDashboardIntervention(targetDate = null) {
     `;
     headerSubtitle = `Laporan ketidakhadiran anak asuhan Anda dari guru mata pelajaran di berbagai kelas untuk pemantauan karakter dan bimbingan konseling.`;
     headerBadgeHtml = `<span class="badge" style="background: rgba(124, 58, 237, 0.15); color: #7c3aed; border: 1px solid rgba(124, 58, 237, 0.3); font-size: 0.78rem;"><i class="fas fa-chalkboard-user"></i> Sumber: Rekap Guru Mapel Lintas Kelas</span>`;
+  } else if (mode === "gurubk") {
+    headerTitleHtml = `
+      <i class="fas fa-user-shield" style="color: #ea580c;"></i>
+      Radar Ketidakhadiran Siswa Sekolah (Layanan BK)
+    `;
+    headerSubtitle = `Pemantauan siswa alpa, bolos, atau terlambat di seluruh kelas untuk intervensi bimbingan konseling, pemanggilan, dan konfirmasi orang tua.`;
+    headerBadgeHtml = `<span class="badge" style="background: rgba(249, 115, 22, 0.15); color: #ea580c; border: 1px solid rgba(249, 115, 22, 0.3); font-size: 0.78rem;"><i class="fas fa-shield-halved"></i> Monitoring Seluruh Kelas</span>`;
   } else {
     headerTitleHtml = `
       <i class="fas fa-user-clock" style="color: #ef4444;"></i>
@@ -1569,6 +2510,8 @@ function renderDashboardIntervention(targetDate = null) {
       emptyMsg = (scopedStudentIds && scopedStudentIds.length === 0) 
         ? "Anda belum menentukan siswa asuhan. Silakan tentukan siswa di menu Kelola Siswa Asuhan."
         : `Belum ada data presensi yang dikirimkan oleh guru mata pelajaran untuk siswa asuhan Anda pada tanggal ${formatDateIndo(dateToUse)}.`;
+    } else if (mode === "gurubk") {
+      emptyMsg = `Belum ada laporan ketidakhadiran siswa dari guru mata pelajaran pada tanggal ${formatDateIndo(dateToUse)}.`;
     } else {
       emptyMsg = (dateToUse === todayStr) ? 'Silakan isi absensi kelas hari ini untuk memantau siswa yang memerlukan konfirmasi kehadiran.' : 'Tidak ditemukan rekaman absensi pada tanggal yang dipilih.';
     }
@@ -1602,6 +2545,8 @@ function renderDashboardIntervention(targetDate = null) {
       completeMsg = `Luar Biasa! Seluruh siswa kelas ${activeKelasObj ? activeKelasObj.nama : ''} hadir lengkap pada semua sesi jam mata pelajaran. Tidak ada laporan kendala kehadiran pada tanggal ${formatDateIndo(dateToUse)}.`;
     } else if (mode === "guruwali") {
       completeMsg = `Seluruh siswa asuhan Anda terpantau aman dan hadir lengkap pada seluruh mata pelajaran hari ini (${formatDateIndo(dateToUse)}).`;
+    } else if (mode === "gurubk") {
+      completeMsg = `Seluruh siswa sekolah hadir lengkap dan tertib pada tanggal ${formatDateIndo(dateToUse)}. Tidak ada laporan alpa, bolos, atau terlambat.`;
     } else {
       completeMsg = `Tidak ada catatan Alpa, Bolos, atau Terlambat pada tanggal ${formatDateIndo(dateToUse)}.`;
     }
@@ -1699,6 +2644,12 @@ function renderDashboardIntervention(targetDate = null) {
         roleSpecificBtn = `
           <button class="btn btn-secondary btn-sm" onclick="openJurnalBimbinganModal(null, '${s.id}')" title="Catat ke Jurnal Bimbingan & Konseling Siswa Asuhan" style="display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; padding: 0; border-radius: 8px;">
             <i class="fas fa-hand-holding-heart"></i>
+          </button>
+        `;
+      } else if (mode === "gurubk") {
+        roleSpecificBtn = `
+          <button class="btn btn-secondary btn-sm" onclick="openKonselingBKModal(null, '${s.id}', 'Pribadi', 'Catatan ketidakhadiran (${a.status}) mapel ${a.mapel || 'sekolah'}')" title="Buka Sesi Konseling Siswa di Ruang BK" style="display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; padding: 0; border-radius: 8px; color: #ea580c; border-color: rgba(249, 115, 22, 0.4);">
+            <i class="fas fa-user-shield"></i>
           </button>
         `;
       }
@@ -1889,6 +2840,9 @@ function openTindakLanjutWA(absensiId) {
   } else if (typeof currentAppMode !== "undefined" && currentAppMode === "guruwali") {
     roleSender = `${guruName} (Guru Wali / Pendamping Asuhan)`;
     sourceText = `berdasarkan laporan dari guru mata pelajaran ${mapel} di kelas ${kelasName}`;
+  } else if (typeof currentAppMode !== "undefined" && currentAppMode === "gurubk") {
+    roleSender = `${guruName} (Guru Bimbingan & Konseling / BK)`;
+    sourceText = `berdasarkan rekapan presensi guru mata pelajaran ${mapel} di kelas ${kelasName}`;
   } else {
     sourceText = `pada jam mata pelajaran ${mapel}`;
   }
@@ -2135,7 +3089,7 @@ function renderDashboardAcademicAlerts(containerId = "dashboard-akademik-section
   if (!container) return;
 
   const mode = typeof currentAppMode !== "undefined" ? currentAppMode : "mapel";
-  if (mode !== "walikelas" && mode !== "guruwali") {
+  if (mode !== "walikelas" && mode !== "guruwali" && mode !== "gurubk") {
     container.innerHTML = "";
     return;
   }
@@ -2153,7 +3107,7 @@ function renderDashboardAcademicAlerts(containerId = "dashboard-akademik-section
   if (mode === "walikelas") {
     const classId = getWaliKelasClassId();
     activeKelasObj = (db.kelas || []).find(k => k.id === classId) || { nama: "Kelas", tingkat: "-" };
-    students = (db.siswa || []).filter(s => s.kelasId === classId);
+    students = getStudentsForClass(classId);
     
     headerTitleHtml = `
       <i class="fas fa-graduation-cap" style="color: #f59e0b;"></i>
@@ -2169,6 +3123,14 @@ function renderDashboardAcademicAlerts(containerId = "dashboard-akademik-section
     `;
     headerSubtitle = `Pemantauan hasil belajar siswa asuhan Anda lintas kelas yang memiliki nilai di bawah KKM (< ${kkmVal}) atau belum menyetor tugas/ulangan untuk bimbingan akademik personal.`;
     headerBadgeHtml = `<span class="badge" style="background: rgba(124, 58, 237, 0.15); color: #7c3aed; border: 1px solid rgba(124, 58, 237, 0.3); font-size: 0.78rem;"><i class="fas fa-chalkboard-user"></i> Rekap Penilaian Lintas Kelas</span>`;
+  } else if (mode === "gurubk") {
+    students = (db.siswa || []);
+    headerTitleHtml = `
+      <i class="fas fa-graduation-cap" style="color: #ea580c;"></i>
+      Radar Kendala Belajar & Remedial Siswa (Bimbingan Belajar BK)
+    `;
+    headerSubtitle = `Pemantauan siswa di seluruh sekolah yang memiliki nilai di bawah KKM (< ${kkmVal}) atau belum menyetor tugas untuk pendampingan bimbingan belajar BK.`;
+    headerBadgeHtml = `<span class="badge" style="background: rgba(249, 115, 22, 0.15); color: #ea580c; border: 1px solid rgba(249, 115, 22, 0.3); font-size: 0.78rem;"><i class="fas fa-graduation-cap"></i> Bimbingan Belajar BK</span>`;
   }
 
   // 1. Kumpulkan semua kendala akademik siswa yang diampu
@@ -2442,6 +3404,12 @@ function renderDashboardAcademicAlerts(containerId = "dashboard-akademik-section
             <i class="fas fa-hand-holding-heart"></i>
           </button>
         `;
+      } else if (mode === "gurubk") {
+        roleSpecificBtn = `
+          <button type="button" class="btn btn-secondary btn-sm" onclick="openKonselingBKModal(null, '${s.id}', 'Belajar', 'Kendala belajar mapel ${item.mapel}: ${item.type === 'below_kkm' ? 'Nilai ' + item.nilai + ' di bawah KKM' : 'Belum mengumpulkan ' + item.label}')" title="Buka Sesi Bimbingan Belajar BK" style="display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; padding: 0; border-radius: 8px; color: #ea580c; border-color: rgba(249, 115, 22, 0.4);">
+            <i class="fas fa-user-shield"></i>
+          </button>
+        `;
       }
 
       // Tombol aksi
@@ -2636,6 +3604,8 @@ function openAcademicAlertWA(issueId) {
     roleSender = `${guruName} (Wali Kelas ${kelasName})`;
   } else if (typeof currentAppMode !== "undefined" && currentAppMode === "guruwali") {
     roleSender = `${guruName} (Guru Wali / Pendamping Asuhan)`;
+  } else if (typeof currentAppMode !== "undefined" && currentAppMode === "gurubk") {
+    roleSender = `${guruName} (Guru Bimbingan & Konseling / BK)`;
   }
 
   // Template 1: Notifikasi Spesifik (Remedial atau Belum Setor)
@@ -2863,6 +3833,8 @@ function shareAcademicAlertRecapWA() {
     const classId = getWaliKelasClassId();
     const k = (db.kelas || []).find(c => c.id === classId) || { nama: "Kelas" };
     titleHeader = `REKAPITULASI KENDALA NILAI & TUGAS SISWA\nKelas: ${k.nama} - ${userSchool}\nPer Tanggal: ${todayStr}\nWali Kelas: ${guruName}`;
+  } else if (mode === "gurubk") {
+    titleHeader = `REKAPITULASI KENDALA NILAI & TUGAS SISWA (BIMBINGAN BELAJAR BK)\n${userSchool}\nPer Tanggal: ${todayStr}\nGuru BK: ${guruName}`;
   } else {
     titleHeader = `REKAPITULASI KENDALA NILAI & TUGAS SISWA ASUHAN\n${userSchool}\nPer Tanggal: ${todayStr}\nGuru Wali: ${guruName}`;
   }
@@ -3036,13 +4008,26 @@ function populateUpcomingSchedule() {
 // ------------------------------------------
 // 2. DATA KELAS VIEW RENDER
 // ------------------------------------------
+// ------------------------------------------
+// 2. DATA KELAS VIEW RENDER
+// ------------------------------------------
 function renderKelas(container) {
+  const session = getSession();
+  const isAdmin = session && session.role === "admin";
+
+  const adminPlottingBtn = isAdmin ? `
+    <button class="btn btn-secondary btn-sm" onclick="openAturWaliKelasModal()" style="color: #059669; border-color: rgba(16, 185, 129, 0.4); font-weight: 600;">
+      <i class="fas fa-user-tie"></i> Penetapan Wali Kelas
+    </button>
+  ` : "";
+
   container.innerHTML = `
     <div class="card">
       <div class="card-header" style="flex-wrap: wrap; gap: 10px;">
         <h3 class="card-title">Daftar Kelas</h3>
         <div style="display: flex; gap: 8px; flex-wrap: wrap;">
           <button class="btn btn-secondary btn-sm" onclick="showSyncMasterSekolahModal()" style="color: #2563eb; border-color: #2563eb; font-weight: 600;"><i class="fas fa-cloud-arrow-down"></i> Sinkron Data Spreadsheet</button>
+          ${adminPlottingBtn}
           <button class="btn btn-primary btn-sm" onclick="showAddKelasModal()"><i class="fas fa-plus"></i> Tambah Kelas</button>
         </div>
       </div>
@@ -3078,12 +4063,19 @@ function loadKelasTable() {
   }
 
   tbody.innerHTML = db.kelas.map((k, idx) => {
-    const jmlSiswa = db.siswa.filter(s => s.kelasId === k.id).length;
+    const jmlSiswa = (db.siswa || []).filter(s => s.kelasId === k.id).length;
+    let waliInfoHtml = `<span style="color: var(--text-muted); font-size: 0.82rem;">- Belum Ditentukan -</span>`;
+    if (k.waliKelasEmail) {
+      waliInfoHtml = `<strong>${k.waliKelas || '-'}</strong><br><span style="font-size: 0.72rem; color: #059669; display: inline-flex; align-items: center; gap: 4px;"><i class="fas fa-user-check"></i> ${k.waliKelasEmail}</span>`;
+    } else if (k.waliKelas) {
+      waliInfoHtml = `<strong>${k.waliKelas}</strong>`;
+    }
+
     return `
       <tr>
         <td>${idx + 1}</td>
         <td><strong>${k.nama}</strong></td>
-        <td>${k.waliKelas || '-'}</td>
+        <td>${waliInfoHtml}</td>
         <td><span class="badge badge-hadir">${jmlSiswa} Siswa</span></td>
         <td class="actions-cell">
           <button class="btn btn-secondary btn-sm" onclick="showEditKelasModal('${k.id}')"><i class="fas fa-edit"></i> Edit</button>
@@ -3094,15 +4086,28 @@ function loadKelasTable() {
   }).join("");
 }
 
-function showAddKelasModal() {
+async function showAddKelasModal() {
+  const users = await getRegisteredUsers();
+  const teachers = users.filter(u => u.role !== "guru_bk");
+
   const formHtml = `
     <div class="form-group">
       <label class="form-label" for="kelas-nama">Nama Kelas</label>
       <input type="text" id="kelas-nama" class="form-control" placeholder="Contoh: X IPA 1" required>
     </div>
     <div class="form-group">
-      <label class="form-label" for="kelas-wali">Wali Kelas</label>
-      <input type="text" id="kelas-wali" class="form-control" placeholder="Nama Guru Wali Kelas" required>
+      <label class="form-label" for="kelas-wali-email">Akun Guru Wali Kelas</label>
+      <select id="kelas-wali-email" class="form-control" onchange="const opt = this.options[this.selectedIndex]; document.getElementById('kelas-wali-nama').value = opt.getAttribute('data-nama') || '';">
+        <option value="">— Belum Ada Wali Kelas (Mode Nonaktif) —</option>
+        ${teachers.map(t => `<option value="${t.email}" data-nama="${t.nama}">${t.nama} (${t.email})</option>`).join("")}
+      </select>
+    </div>
+    <div class="form-group">
+      <label class="form-label" for="kelas-wali-nama">Label Nama Wali Kelas</label>
+      <input type="text" id="kelas-wali-nama" class="form-control" placeholder="Nama Guru Wali Kelas..." required>
+      <small style="color:var(--text-muted); font-size:0.75rem; display:block; margin-top:4px;">
+        <i class="fas fa-info-circle"></i> Akun guru yang dipilih akan otomatis terkoneksi dan memiliki Mode Wali Kelas untuk kelas ini.
+      </small>
     </div>
   `;
 
@@ -3114,26 +4119,43 @@ function showAddKelasModal() {
   openModal("Tambah Kelas Baru", formHtml, footerHtml);
 }
 
-function submitAddKelas() {
+async function submitAddKelas() {
   const nama = document.getElementById("kelas-nama").value.trim();
-  const waliKelas = document.getElementById("kelas-wali").value.trim();
+  const waliSelect = document.getElementById("kelas-wali-email");
+  const waliKelasEmail = waliSelect ? waliSelect.value.trim().toLowerCase() : "";
+  const selectedOpt = waliSelect && waliSelect.selectedIndex >= 0 ? waliSelect.options[waliSelect.selectedIndex] : null;
+  const waliKelas = document.getElementById("kelas-wali-nama") ? document.getElementById("kelas-wali-nama").value.trim() : (selectedOpt ? selectedOpt.getAttribute("data-nama") || "" : "");
 
-  if (!nama || !waliKelas) {
-    alert("Semua input wajib diisi!");
+  if (!nama) {
+    alert("Nama kelas wajib diisi!");
     return;
   }
 
   const id = "k-" + Date.now();
-  db.kelas.push({ id, nama, waliKelas });
-  saveDatabase();
+  db.kelas.push({ id, nama, waliKelas, waliKelasEmail });
+
+  if (waliKelasEmail) {
+    const users = await getRegisteredUsers();
+    users.forEach(u => {
+      if (u.email.toLowerCase() === waliKelasEmail) u.kelasWaliId = id;
+    });
+    await saveRegisteredUsers(users);
+  }
+
+  await saveDatabase();
   closeModal();
   loadKelasTable();
+  initAppMode();
   showToast(`Kelas ${nama} berhasil ditambahkan!`);
 }
 
-function showEditKelasModal(id) {
+async function showEditKelasModal(id) {
   const kelasObj = db.kelas.find(k => k.id === id);
   if (!kelasObj) return;
+
+  const users = await getRegisteredUsers();
+  const teachers = users.filter(u => u.role !== "guru_bk");
+  const currentEmail = (kelasObj.waliKelasEmail || "").toLowerCase();
 
   const formHtml = `
     <input type="hidden" id="edit-kelas-id" value="${kelasObj.id}">
@@ -3142,8 +4164,21 @@ function showEditKelasModal(id) {
       <input type="text" id="edit-kelas-nama" class="form-control" value="${kelasObj.nama}" required>
     </div>
     <div class="form-group">
-      <label class="form-label" for="edit-kelas-wali">Wali Kelas</label>
-      <input type="text" id="edit-kelas-wali" class="form-control" value="${kelasObj.waliKelas || ''}" required>
+      <label class="form-label" for="edit-kelas-wali-email">Akun Guru Wali Kelas</label>
+      <select id="edit-kelas-wali-email" class="form-control" onchange="const opt = this.options[this.selectedIndex]; document.getElementById('edit-kelas-wali-nama').value = opt.getAttribute('data-nama') || '';">
+        <option value="">— Belum Ada Wali Kelas (Mode Nonaktif) —</option>
+        ${teachers.map(t => {
+          const isSelected = currentEmail === t.email.toLowerCase() || (!currentEmail && kelasObj.waliKelas && kelasObj.waliKelas.trim().toLowerCase() === t.nama.trim().toLowerCase());
+          return `<option value="${t.email}" data-nama="${t.nama}" ${isSelected ? 'selected' : ''}>${t.nama} (${t.email})</option>`;
+        }).join("")}
+      </select>
+    </div>
+    <div class="form-group">
+      <label class="form-label" for="edit-kelas-wali-nama">Label Nama Wali Kelas</label>
+      <input type="text" id="edit-kelas-wali-nama" class="form-control" value="${kelasObj.waliKelas || ''}" required>
+      <small style="color:var(--text-muted); font-size:0.75rem; display:block; margin-top:4px;">
+        <i class="fas fa-info-circle"></i> Akun guru yang dipilih akan otomatis terkoneksi dan memiliki Mode Wali Kelas untuk kelas ini.
+      </small>
     </div>
   `;
 
@@ -3155,13 +4190,16 @@ function showEditKelasModal(id) {
   openModal("Edit Kelas", formHtml, footerHtml);
 }
 
-function submitEditKelas() {
+async function submitEditKelas() {
   const id = document.getElementById("edit-kelas-id").value;
   const nama = document.getElementById("edit-kelas-nama").value.trim();
-  const waliKelas = document.getElementById("edit-kelas-wali").value.trim();
+  const waliSelect = document.getElementById("edit-kelas-wali-email");
+  const waliKelasEmail = waliSelect ? waliSelect.value.trim().toLowerCase() : "";
+  const selectedOpt = waliSelect && waliSelect.selectedIndex >= 0 ? waliSelect.options[waliSelect.selectedIndex] : null;
+  const waliKelas = document.getElementById("edit-kelas-wali-nama") ? document.getElementById("edit-kelas-wali-nama").value.trim() : (selectedOpt ? selectedOpt.getAttribute("data-nama") || "" : "");
 
-  if (!nama || !waliKelas) {
-    alert("Semua input wajib diisi!");
+  if (!nama) {
+    alert("Nama kelas wajib diisi!");
     return;
   }
 
@@ -3169,11 +4207,192 @@ function submitEditKelas() {
   if (idx !== -1) {
     db.kelas[idx].nama = nama;
     db.kelas[idx].waliKelas = waliKelas;
-    saveDatabase();
+    db.kelas[idx].waliKelasEmail = waliKelasEmail;
+
+    const users = await getRegisteredUsers();
+    users.forEach(u => {
+      if (waliKelasEmail && u.email.toLowerCase() === waliKelasEmail) {
+        u.kelasWaliId = id;
+      } else if (u.kelasWaliId === id) {
+        delete u.kelasWaliId;
+      }
+    });
+    await saveRegisteredUsers(users);
+
+    await saveDatabase();
+    await distributeMasterClassesToAllTeachers(db.kelas, db.siswa);
     closeModal();
     loadKelasTable();
+    initAppMode();
     showToast(`Kelas ${nama} berhasil diupdate!`);
   }
+}
+
+// ------------------------------------------
+// PENGATURAN PLOTTING WALI KELAS OLEH ADMINISTRATOR
+// ------------------------------------------
+async function openAturWaliKelasModal() {
+  const session = getSession();
+  const isAdmin = session && session.role === "admin";
+  if (!isAdmin) {
+    alert("Hanya Administrator yang memiliki akses untuk mengatur penetapan wali kelas.");
+    return;
+  }
+
+  const users = await getRegisteredUsers();
+  const teachers = users.filter(u => u.role !== "guru_bk"); // Guru biasa dan admin
+  const classes = db.kelas || [];
+
+  if (classes.length === 0) {
+    alert("Belum ada data kelas yang terdaftar. Tambahkan kelas terlebih dahulu.");
+    return;
+  }
+
+  const bodyHtml = `
+    <div style="font-size: 0.88rem;">
+      <div style="background: rgba(16, 185, 129, 0.08); border: 1px solid rgba(16, 185, 129, 0.25); padding: 12px 14px; border-radius: 10px; margin-bottom: 16px;">
+        <div style="font-weight: 700; color: #059669; margin-bottom: 4px; display: flex; align-items: center; gap: 8px;">
+          <i class="fas fa-shield-alt"></i> Pengaturan Penetapan Wali Kelas oleh Administrator
+        </div>
+        <p style="margin: 0; font-size: 0.82rem; color: var(--text-main); line-height: 1.5;">
+          Tentukan akun guru yang memegang tugas sebagai <b>Wali Kelas</b> untuk masing-masing rombongan belajar.<br>
+          <span style="color: var(--text-muted); font-size: 0.78rem;">
+            * Akun guru yang <b>tidak ditetapkan</b> sebagai wali kelas <b>tidak akan melihat Mode Wali Kelas</b> di aplikasi.<br>
+            * Akun guru yang <b>teridentifikasi</b> sebagai wali kelas saat masuk ke Mode Wali Kelas akan <b>langsung terkoneksi</b> dengan kelas yang ditetapkan di sini.
+          </span>
+        </p>
+      </div>
+
+      <div class="table-responsive" style="max-height: 420px; overflow-y: auto;">
+        <table>
+          <thead>
+            <tr>
+              <th style="width: 40px; text-align: center;">No</th>
+              <th>Nama Kelas</th>
+              <th style="text-align: center;">Siswa</th>
+              <th>Akun Guru Wali Kelas</th>
+              <th>Status Akses</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${classes.map((k, idx) => {
+              const studentCount = (db.siswa || []).filter(s => s.kelasId === k.id).length;
+              const currentWaliEmail = (k.waliKelasEmail || "").toLowerCase();
+              const currentWaliByName = !currentWaliEmail && k.waliKelas ? teachers.find(t => t.nama.trim().toLowerCase() === k.waliKelas.trim().toLowerCase()) : null;
+              const selectedEmail = currentWaliEmail || (currentWaliByName ? currentWaliByName.email.toLowerCase() : "");
+
+              return `
+                <tr>
+                  <td style="text-align: center;">${idx + 1}</td>
+                  <td>
+                    <strong>Kelas ${k.nama}</strong>
+                    <input type="hidden" name="plotting_kelas_id" value="${k.id}">
+                  </td>
+                  <td style="text-align: center;"><span class="badge badge-hadir">${studentCount}</span></td>
+                  <td>
+                    <select class="form-control" name="plotting_wali_email_${k.id}" style="font-size: 0.84rem; min-width: 220px;" onchange="updatePlottingBadge(this, '${k.id}')">
+                      <option value="">— Belum Ada Wali Kelas (Mode Nonaktif) —</option>
+                      ${teachers.map(t => {
+                        const isSelected = selectedEmail === t.email.toLowerCase();
+                        return `<option value="${t.email}" data-nama="${t.nama}" ${isSelected ? 'selected' : ''}>${t.nama} (${t.email})</option>`;
+                      }).join("")}
+                    </select>
+                  </td>
+                  <td id="plotting-status-${k.id}">
+                    ${selectedEmail ? `
+                      <span class="badge badge-hadir" style="font-size: 0.75rem;"><i class="fas fa-check-circle"></i> Terhubung</span>
+                    ` : `
+                      <span class="badge badge-izin" style="font-size: 0.75rem;"><i class="fas fa-ban"></i> Mode Nonaktif</span>
+                    `}
+                  </td>
+                </tr>
+              `;
+            }).join("")}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+
+  const footerHtml = `
+    <button type="button" class="btn btn-secondary" onclick="closeModal()">Batal</button>
+    <button type="button" class="btn btn-primary" onclick="submitPlottingWaliKelas()" style="background: linear-gradient(135deg, #10b981, #059669); border-color: #059669;">
+      <i class="fas fa-save"></i> Simpan Penetapan Wali Kelas
+    </button>
+  `;
+
+  openModal("Penetapan Wali Kelas oleh Administrator", bodyHtml, footerHtml, true);
+}
+
+function updatePlottingBadge(selectEl, classId) {
+  const statusEl = document.getElementById(`plotting-status-${classId}`);
+  if (!statusEl) return;
+  if (selectEl.value) {
+    statusEl.innerHTML = `<span class="badge badge-hadir" style="font-size: 0.75rem;"><i class="fas fa-check-circle"></i> Terhubung</span>`;
+  } else {
+    statusEl.innerHTML = `<span class="badge badge-izin" style="font-size: 0.75rem;"><i class="fas fa-ban"></i> Mode Nonaktif</span>`;
+  }
+}
+
+async function submitPlottingWaliKelas() {
+  const classIdInputs = document.querySelectorAll("input[name='plotting_kelas_id']");
+  if (!classIdInputs || classIdInputs.length === 0) return;
+
+  const users = await getRegisteredUsers();
+
+  // Reset kelasWaliId on all users first
+  users.forEach(u => {
+    delete u.kelasWaliId;
+  });
+
+  classIdInputs.forEach(input => {
+    const classId = input.value;
+    const select = document.querySelector(`select[name='plotting_wali_email_${classId}']`);
+    if (!select) return;
+
+    const email = select.value.trim().toLowerCase();
+    const selectedOpt = select.options[select.selectedIndex];
+    const nama = selectedOpt ? selectedOpt.getAttribute("data-nama") || "" : "";
+
+    const kIdx = (db.kelas || []).findIndex(k => k.id === classId);
+    if (kIdx !== -1) {
+      if (email) {
+        db.kelas[kIdx].waliKelasEmail = email;
+        db.kelas[kIdx].waliKelas = nama || db.kelas[kIdx].waliKelas || "";
+
+        const u = users.find(x => x.email.toLowerCase() === email);
+        if (u) {
+          u.kelasWaliId = classId;
+        }
+      } else {
+        db.kelas[kIdx].waliKelasEmail = "";
+      }
+    }
+  });
+
+  await saveRegisteredUsers(users);
+  await saveDatabase(true);
+  await distributeMasterClassesToAllTeachers(db.kelas, db.siswa);
+
+  // If the active user's assignment changed, update session
+  const currentSession = getSession();
+  if (currentSession) {
+    const assigned = getAssignedWaliKelas(currentSession);
+    if (assigned) {
+      currentSession.kelasWaliId = assigned.id;
+    } else {
+      delete currentSession.kelasWaliId;
+    }
+    setSession(currentSession);
+  }
+
+  closeModal();
+  showToast("Penetapan wali kelas berhasil disimpan!");
+
+  initAppMode();
+  loadKelasTable();
+  const activeHash = window.location.hash.substring(1) || "dashboard";
+  renderPage(activeHash);
 }
 
 function deleteKelas(id) {
@@ -10023,6 +11242,73 @@ function downloadCSV(csvContent, fileName) {
 
 
 // ------------------------------------------
+// 8. MANAJEMEN AKUN VIEW RENDER (ADMIN ONLY)
+// ------------------------------------------
+function renderManajemenAkun(container) {
+  const session = getSession();
+  const isAdmin = session && session.role === "admin";
+
+  if (!isAdmin) {
+    container.innerHTML = `
+      <div class="card" style="text-align:center; padding:40px 20px;">
+        <i class="fas fa-lock" style="font-size:3rem; color:var(--danger); margin-bottom:15px;"></i>
+        <h3>Akses Terbatas</h3>
+        <p style="color:var(--text-muted);">Halaman ini hanya dapat diakses oleh Administrator.</p>
+        <button class="btn btn-primary" onclick="navigate('dashboard')" style="margin-top:15px;">Kembali ke Dashboard</button>
+      </div>
+    `;
+    return;
+  }
+
+  container.innerHTML = `
+    <div style="display:flex; flex-direction:column; gap:20px;">
+      <div class="card">
+        <div class="card-header" style="justify-content: space-between; display: flex; align-items: center; flex-wrap: wrap; gap: 10px;">
+          <div>
+            <h3 class="card-title"><i class="fas fa-users-cog" style="color:var(--primary); margin-right:8px;"></i> Manajemen Akun Guru & Pengguna</h3>
+            <p style="font-size:0.85rem; color:var(--text-muted); margin-top:4px;">
+              Kelola data seluruh akun email, password, peran hak akses, dan penugasan wali kelas.
+            </p>
+          </div>
+          <button class="btn btn-primary btn-sm" onclick="showAddUserModal()">
+            <i class="fas fa-plus"></i> Tambah Akun Guru
+          </button>
+        </div>
+
+        <div style="background:rgba(30,58,138,0.06); padding:12px 16px; border-radius:8px; border:1px solid rgba(30,58,138,0.15); margin: 15px 0; font-size:0.85rem; display:flex; align-items:center; gap:10px;">
+          <i class="fas fa-shield-alt" style="color:var(--primary); font-size:1.2rem;"></i>
+          <span><strong>Akun Utama:</strong> <code>admin@smansaku.id</code> adalah akun super admin permanen. Akun administrator lain tidak dapat menghapus Akun Utama dan password Akun Utama selalu terlindungi.</span>
+        </div>
+
+        <div class="table-responsive">
+          <table>
+            <thead>
+              <tr>
+                <th style="width: 50px;">No</th>
+                <th>Nama Lengkap</th>
+                <th>Email & Password</th>
+                <th>Peran (Role)</th>
+                <th>Penugasan Wali Kelas</th>
+                <th class="actions-cell">Aksi</th>
+              </tr>
+            </thead>
+            <tbody id="users-table-body">
+              <tr>
+                <td colspan="6" style="text-align: center; padding: 25px; color: var(--text-muted);">
+                  <i class="fas fa-spinner fa-spin"></i> Memuat daftar akun...
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  `;
+
+  loadUsersTable();
+}
+
+// ------------------------------------------
 // 9. PROFIL GURU & SEKOLAH VIEW RENDER
 // ------------------------------------------
 function renderProfil(container) {
@@ -10035,6 +11321,12 @@ function renderProfil(container) {
   const isAdmin = session && session.role === "admin";
   const currSettings = getSettingsSiswaBaru();
 
+  const roleBadgeHtml = session && session.role === "admin"
+    ? `<span class="badge badge-hadir" style="margin-left: 8px; font-size: 0.75rem; vertical-align: middle;"><i class="fas fa-crown"></i> Administrator</span>`
+    : (session && session.role === "guru_bk"
+      ? `<span class="badge badge-bk-role" style="margin-left: 8px; font-size: 0.75rem; vertical-align: middle;"><i class="fas fa-user-shield"></i> Guru BK (Bimbingan Konseling)</span>`
+      : `<span class="badge badge-izin" style="margin-left: 8px; font-size: 0.75rem; vertical-align: middle;"><i class="fas fa-chalkboard-user"></i> Guru Mata Pelajaran</span>`);
+
   container.innerHTML = `
     <div style="display:grid; grid-template-columns: 1.5fr 1fr; gap:30px;">
       <!-- Column Left -->
@@ -10042,7 +11334,7 @@ function renderProfil(container) {
         <!-- Profile Form -->
         <div class="card">
           <div class="card-header">
-            <h3 class="card-title">Profil Guru & Sekolah</h3>
+            <h3 class="card-title">Profil Guru & Sekolah ${roleBadgeHtml}</h3>
           </div>
           
           <!-- Foto Profil & Logo Sekolah Upload Row -->
@@ -10117,7 +11409,10 @@ function renderProfil(container) {
         <div class="card">
           <div class="card-header" style="justify-content: space-between; display: flex; align-items: center; flex-wrap: wrap; gap: 10px;">
             <h3 class="card-title">Manajemen Akun Guru / Pengguna</h3>
-            <button class="btn btn-primary btn-sm" onclick="showAddUserModal()"><i class="fas fa-plus"></i> Tambah Akun</button>
+            <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+              <button class="btn btn-secondary btn-sm" onclick="openAturWaliKelasModal()"><i class="fas fa-user-tie"></i> Penetapan Wali Kelas</button>
+              <button class="btn btn-primary btn-sm" onclick="showAddUserModal()"><i class="fas fa-plus"></i> Tambah Akun</button>
+            </div>
           </div>
           <p style="font-size:0.85rem; color:var(--text-muted); margin-bottom:15px;">
             Kelola akun email dan password yang diperbolehkan masuk ke aplikasi Sman_Saku.<br>
@@ -10133,6 +11428,7 @@ function renderProfil(container) {
                   <th>Nama</th>
                   <th>Email & Password</th>
                   <th>Role</th>
+                  <th>Wali Kelas</th>
                   <th class="actions-cell">Aksi</th>
                 </tr>
               </thead>
@@ -10376,86 +11672,102 @@ async function loadUsersTable() {
   const tbody = document.getElementById("users-table-body");
   if (!tbody) return;
 
-  const users = await getRegisteredUsers();
-  const session = getSession();
-  const isAdmin = session && session.role === "admin";
-  const currentEmail = session ? session.email.toLowerCase() : "";
-  const isPrimaryAdmin = currentEmail === "admin@smansaku.id";
+  try {
+    const users = await getRegisteredUsers();
+    const session = getSession();
+    const isAdmin = session && session.role === "admin";
+    const currentEmail = session ? session.email.toLowerCase() : "";
+    const isPrimaryAdmin = currentEmail === "admin@smansaku.id";
 
-  if (users.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="${isAdmin ? 5 : 4}" style="text-align: center; color: var(--text-muted);">Belum ada data akun terdaftar.</td></tr>`;
-    return;
-  }
+    const validUsers = (users || []).filter(u => u && u.email);
 
-  tbody.innerHTML = users.map((u, idx) => {
-    const targetEmail = u.email.toLowerCase();
-    const isSelf = targetEmail === currentEmail;
-    const isTargetPrimary = targetEmail === "admin@smansaku.id";
-    const isTargetAdmin = u.role === "admin";
-
-    let roleBadge = "badge-izin";
-    let roleText = "Guru";
-    let primaryBadge = "";
-
-    if (isTargetPrimary) {
-      roleBadge = "badge-hadir";
-      roleText = "Super Admin";
-      primaryBadge = `<span class="badge" style="background: rgba(245, 158, 11, 0.15); color: #d97706; border: 1px solid rgba(245, 158, 11, 0.3); font-size: 0.72rem; margin-left: 6px;"><i class="fas fa-crown"></i> Akun Utama</span>`;
-    } else if (isTargetAdmin) {
-      roleBadge = "badge-hadir";
-      roleText = "Admin";
+    if (validUsers.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="${isAdmin ? 6 : 5}" style="text-align: center; color: var(--text-muted); padding: 20px;">Belum ada data akun terdaftar.</td></tr>`;
+      return;
     }
-    
-    let actionsHtml = "";
-    if (isAdmin) {
-      // Edit button logic
-      let editBtnHtml = "";
-      if (isTargetPrimary && !isPrimaryAdmin) {
-        editBtnHtml = `<button class="btn btn-secondary btn-sm" disabled style="opacity: 0.4; cursor: not-allowed;" title="Hanya Akun Utama yang dapat mengedit data admin@smansaku.id"><i class="fas fa-lock"></i> Terkunci</button>`;
-      } else if (isTargetAdmin && !isTargetPrimary && !isPrimaryAdmin && !isSelf) {
-        editBtnHtml = `<button class="btn btn-secondary btn-sm" disabled style="opacity: 0.4; cursor: not-allowed;" title="Hanya Akun Utama yang dapat mengedit sesama Administrator"><i class="fas fa-lock"></i> Terkunci</button>`;
-      } else {
-        editBtnHtml = `<button class="btn btn-secondary btn-sm" onclick="showEditUserModal('${u.email}')"><i class="fas fa-edit"></i> Edit</button>`;
-      }
 
-      // Delete button logic
-      let deleteBtnHtml = "";
+    tbody.innerHTML = validUsers.map((u, idx) => {
+      const targetEmail = (u.email || "").toLowerCase();
+      const isSelf = targetEmail === currentEmail;
+      const isTargetPrimary = targetEmail === "admin@smansaku.id";
+      const isTargetAdmin = u.role === "admin";
+
+      let roleBadge = "badge-izin";
+      let roleText = "Guru Mapel";
+      let primaryBadge = "";
+
       if (isTargetPrimary) {
-        // Akun Utama tidak pernah bisa dihapus oleh siapapun
-        deleteBtnHtml = `<button class="btn btn-danger btn-sm" disabled style="opacity: 0.4; cursor: not-allowed;" title="Akun Utama (admin@smansaku.id) tidak dapat dihapus"><i class="fas fa-ban"></i> Terkunci</button>`;
-      } else if (isSelf) {
-        // Tidak dapat menghapus akun sendiri yang sedang aktif
-        deleteBtnHtml = `<button class="btn btn-danger btn-sm" disabled style="opacity: 0.4; cursor: not-allowed;" title="Tidak dapat menghapus akun sendiri yang sedang aktif"><i class="fas fa-trash"></i> Hapus</button>`;
+        roleBadge = "badge-hadir";
+        roleText = "Super Admin";
+        primaryBadge = `<span class="badge" style="background: rgba(245, 158, 11, 0.15); color: #d97706; border: 1px solid rgba(245, 158, 11, 0.3); font-size: 0.72rem; margin-left: 6px;"><i class="fas fa-crown"></i> Akun Utama</span>`;
       } else if (isTargetAdmin) {
-        // Akun admin lainnya HANYA bisa dihapus oleh akun admin@smansaku.id
-        if (isPrimaryAdmin) {
-          deleteBtnHtml = `<button class="btn btn-danger btn-sm" onclick="deleteUser('${u.email}')" title="Hapus akun Administrator"><i class="fas fa-trash"></i> Hapus</button>`;
-        } else {
-          deleteBtnHtml = `<button class="btn btn-danger btn-sm" disabled style="opacity: 0.4; cursor: not-allowed;" title="Hanya Akun Utama (admin@smansaku.id) yang dapat menghapus akun Administrator"><i class="fas fa-lock"></i> Terkunci</button>`;
-        }
-      } else {
-        // Akun guru biasa: dapat dihapus oleh admin mana pun
-        deleteBtnHtml = `<button class="btn btn-danger btn-sm" onclick="deleteUser('${u.email}')" title="Hapus akun guru"><i class="fas fa-trash"></i> Hapus</button>`;
+        roleBadge = "badge-hadir";
+        roleText = "Admin";
+      } else if (u.role === "guru_bk") {
+        roleBadge = "badge-bk-role";
+        roleText = "Guru BK";
       }
 
-      actionsHtml = `
-        <td class="actions-cell">
-          ${editBtnHtml}
-          ${deleteBtnHtml}
-        </td>
-      `;
-    }
+      // Penugasan Wali Kelas
+      let waliKelasStatusHtml = "";
+      if (u.role === "admin") {
+        waliKelasStatusHtml = `<span class="badge" style="background:rgba(59,130,246,0.12); color:#2563eb; border:1px solid rgba(59,130,246,0.25);"><i class="fas fa-shield-alt"></i> Supervisi Semua Kelas</span>`;
+      } else {
+        const assigned = (db.kelas || []).find(k => {
+          if (k.waliKelasEmail && k.waliKelasEmail.toLowerCase() === targetEmail) return true;
+          if (u.kelasWaliId && String(k.id) === String(u.kelasWaliId)) return true;
+          return false;
+        });
+        if (assigned) {
+          waliKelasStatusHtml = `<span class="badge" style="background:rgba(16,185,129,0.15); color:#059669; border:1px solid rgba(16,185,129,0.3); font-weight:600;"><i class="fas fa-chalkboard-teacher"></i> Kelas ${escapeHtml(assigned.nama)}</span>`;
+        } else {
+          waliKelasStatusHtml = `<span style="font-size:0.78rem; color:var(--text-muted);"><i class="fas fa-minus-circle"></i> Bukan Wali Kelas</span>`;
+        }
+      }
+      
+      let actionsHtml = "";
+      if (isAdmin) {
+        // Edit button: Selalu aktif untuk Administrator agar dapat mengedit data dan peran akun
+        const editBtnHtml = `<button class="btn btn-secondary btn-sm" onclick="showEditUserModal('${escapeHtml(u.email)}')"><i class="fas fa-edit"></i> Edit</button>`;
 
-    return `
-      <tr>
-        <td>${idx + 1}</td>
-        <td><strong>${u.nama}</strong>${primaryBadge}</td>
-        <td><code>${u.email}</code><br><span style="font-size:0.75rem; color:var(--text-muted);">Password: ${u.password}</span></td>
-        <td><span class="badge ${roleBadge}">${roleText}</span></td>
-        ${actionsHtml}
-      </tr>
-    `;
-  }).join("");
+        // Delete button logic
+        let deleteBtnHtml = "";
+        if (isTargetPrimary) {
+          deleteBtnHtml = `<button class="btn btn-danger btn-sm" disabled style="opacity: 0.4; cursor: not-allowed;" title="Akun Utama (admin@smansaku.id) tidak dapat dihapus"><i class="fas fa-ban"></i> Terkunci</button>`;
+        } else if (isSelf) {
+          deleteBtnHtml = `<button class="btn btn-danger btn-sm" disabled style="opacity: 0.4; cursor: not-allowed;" title="Tidak dapat menghapus akun sendiri yang sedang aktif"><i class="fas fa-trash"></i> Hapus</button>`;
+        } else {
+          deleteBtnHtml = `<button class="btn btn-danger btn-sm" onclick="deleteUser('${escapeHtml(u.email)}')" title="Hapus akun pengguna"><i class="fas fa-trash"></i> Hapus</button>`;
+        }
+
+        actionsHtml = `
+          <td class="actions-cell">
+            ${editBtnHtml}
+            ${deleteBtnHtml}
+          </td>
+        `;
+      }
+
+      const hidePassword = isTargetPrimary && !isPrimaryAdmin;
+      const passwordDisplay = hidePassword
+        ? `<code style="letter-spacing: 2px;">••••••••</code> <span style="font-size:0.7rem; color:var(--text-muted); font-style:italic;">(Terproteksi)</span>`
+        : escapeHtml(u.password);
+
+      return `
+        <tr>
+          <td>${idx + 1}</td>
+          <td><strong>${escapeHtml(u.nama || '-')}</strong>${primaryBadge}</td>
+          <td><code>${escapeHtml(u.email)}</code><br><span style="font-size:0.75rem; color:var(--text-muted);">Password: ${passwordDisplay}</span></td>
+          <td><span class="badge ${roleBadge}">${roleText}</span></td>
+          <td>${waliKelasStatusHtml}</td>
+          ${actionsHtml}
+        </tr>
+      `;
+    }).join("");
+  } catch (err) {
+    console.error("Gagal memuat tabel pengguna:", err);
+    tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--danger); padding: 20px;">Gagal memuat daftar akun: ${escapeHtml(err.message)}</td></tr>`;
+  }
 }
 
 // Show Add User Modal
@@ -10480,10 +11792,25 @@ function showAddUserModal() {
     <div class="form-group">
       <label class="form-label" for="user-role">Peran (Role)</label>
       <select id="user-role" class="form-control" required>
-        <option value="guru" selected>Guru</option>
-        ${isPrimaryAdmin ? '<option value="admin">Administrator</option>' : ''}
+        <option value="guru" selected>Guru Mata Pelajaran</option>
+        <option value="guru_bk">Guru BK (Bimbingan Konseling)</option>
+        <option value="admin">Administrator</option>
       </select>
-      ${!isPrimaryAdmin ? '<small style="color:var(--text-muted); font-size:0.75rem; display:block; margin-top:4px;"><i class="fas fa-info-circle"></i> Hanya Akun Utama (admin@smansaku.id) yang dapat membuat akun Administrator baru.</small>' : ''}
+      <small style="color:var(--text-muted); font-size:0.75rem; display:block; margin-top:4px;"><i class="fas fa-info-circle"></i> Tentukan hak akses akun: Guru Mapel, Guru BK, atau Administrator.</small>
+    </div>
+    <div class="form-group" id="group-add-user-kelas-wali">
+      <label class="form-label" for="user-kelas-wali">Penugasan Wali Kelas</label>
+      <select id="user-kelas-wali" class="form-control">
+        <option value="">— Bukan Wali Kelas —</option>
+        ${(db.kelas || []).map(k => `
+          <option value="${k.id}">
+            Kelas ${escapeHtml(k.nama)} ${k.waliKelas ? '(Saat ini: ' + escapeHtml(k.waliKelas) + ')' : ''}
+          </option>
+        `).join("")}
+      </select>
+      <small style="color:var(--text-muted); font-size:0.75rem; display:block; margin-top:4px;">
+        <i class="fas fa-info-circle"></i> Jika akun guru ditugaskan sebagai wali kelas, Mode Wali Kelas otomatis aktif dan langsung terkoneksi ke kelas ini.
+      </small>
     </div>
   `;
 
@@ -10501,6 +11828,7 @@ async function submitAddUser() {
   const nama = document.getElementById("user-nama").value.trim();
   const password = document.getElementById("user-password").value.trim();
   const role = document.getElementById("user-role").value;
+  const kelasWaliId = document.getElementById("user-kelas-wali") ? document.getElementById("user-kelas-wali").value : "";
 
   const session = getSession();
   const currentEmail = session ? session.email.toLowerCase() : "";
@@ -10515,11 +11843,6 @@ async function submitAddUser() {
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   if (!emailRegex.test(email)) {
     alert("Format email tidak valid!");
-    return;
-  }
-
-  if (role === "admin" && !isPrimaryAdmin) {
-    alert("Hanya Akun Utama (admin@smansaku.id) yang berhak menambahkan akun Administrator baru!");
     return;
   }
 
@@ -10543,10 +11866,23 @@ async function submitAddUser() {
     }
   }
 
-  users.push({ email, nama, password, role });
+  users.push({ email, nama, password, role, kelasWaliId });
   await saveRegisteredUsers(users);
+
+  // Jika ditugaskan sebagai wali kelas, sinkronkan ke db.kelas
+  if (kelasWaliId) {
+    const targetK = (db.kelas || []).find(k => String(k.id) === String(kelasWaliId));
+    if (targetK) {
+      targetK.waliKelasEmail = email;
+      targetK.waliKelas = nama;
+      await saveDatabase(true);
+      await distributeMasterClassesToAllTeachers(db.kelas, db.siswa);
+    }
+  }
+
   closeModal();
   await loadUsersTable();
+  initAppMode();
   showToast(`Akun ${nama} berhasil ditambahkan!`);
 }
 
@@ -10558,25 +11894,19 @@ async function showEditUserModal(email) {
 
   const session = getSession();
   const currentEmail = session ? session.email.toLowerCase() : "";
-  const isPrimaryAdmin = currentEmail === "admin@smansaku.id";
   const targetEmail = user.email.toLowerCase();
   const isTargetPrimary = targetEmail === "admin@smansaku.id";
-  const isSelf = targetEmail === currentEmail;
-
-  // Proteksi: Jika target adalah admin@smansaku.id tapi yang login bukan admin@smansaku.id
-  if (isTargetPrimary && !isPrimaryAdmin) {
-    alert("Akses ditolak: Akun Utama (admin@smansaku.id) hanya dapat diedit oleh akun admin@smansaku.id!");
-    return;
-  }
-
-  // Proteksi: Jika target adalah admin lain dan yang login bukan admin@smansaku.id dan bukan akun itu sendiri
-  if (user.role === "admin" && !isPrimaryAdmin && !isSelf) {
-    alert("Akses ditolak: Hanya Akun Utama yang dapat mengedit data Administrator lain!");
-    return;
-  }
-
+  const isPrimaryAdmin = currentEmail === "admin@smansaku.id";
+  const hidePassword = isTargetPrimary && !isPrimaryAdmin;
   const isEmailLocked = isTargetPrimary;
-  const isRoleLocked = isTargetPrimary || !isPrimaryAdmin;
+
+  // Ambil kelas binaan saat ini jika ada
+  const currentAssigned = (db.kelas || []).find(k => {
+    if (k.waliKelasEmail && k.waliKelasEmail.toLowerCase() === user.email.toLowerCase()) return true;
+    if (user.kelasWaliId && String(k.id) === String(user.kelasWaliId)) return true;
+    return false;
+  });
+  const currentAssignedId = currentAssigned ? currentAssigned.id : (user.kelasWaliId || "");
 
   const formHtml = `
     <input type="hidden" id="edit-user-old-email" value="${user.email}">
@@ -10588,23 +11918,44 @@ async function showEditUserModal(email) {
       <label class="form-label" for="edit-user-nama">Nama Lengkap</label>
       <input type="text" id="edit-user-nama" class="form-control" value="${user.nama}" required>
     </div>
+    ${hidePassword ? `
+      <div class="form-group">
+        <label class="form-label" for="edit-user-password">Password <span style="color:var(--accent); font-size:0.75rem;">(Terproteksi - Akun Utama)</span></label>
+        <input type="password" id="edit-user-password" class="form-control" value="••••••••" readonly style="background-color:var(--bg-secondary); cursor:not-allowed;" title="Password Akun Utama terproteksi dan hanya dapat diubah oleh Administrator Utama">
+        <small style="color:var(--text-muted); font-size:0.75rem; display:block; margin-top:4px;">
+          <i class="fas fa-lock"></i> Password Akun Utama terproteksi dan hanya dapat diubah oleh Akun Utama itu sendiri.
+        </small>
+      </div>
+    ` : `
+      <div class="form-group">
+        <label class="form-label" for="edit-user-password">Password</label>
+        <input type="text" id="edit-user-password" class="form-control" value="${escapeHtml(user.password)}" required>
+      </div>
+    `}
     <div class="form-group">
-      <label class="form-label" for="edit-user-password">Password</label>
-      <input type="text" id="edit-user-password" class="form-control" value="${user.password}" required>
+      <label class="form-label" for="edit-user-role">Peran (Role)</label>
+      <select id="edit-user-role" class="form-control" required>
+        <option value="guru" ${user.role === 'guru' ? 'selected' : ''}>Guru Mata Pelajaran</option>
+        <option value="guru_bk" ${user.role === 'guru_bk' ? 'selected' : ''}>Guru BK (Bimbingan Konseling)</option>
+        <option value="admin" ${user.role === 'admin' ? 'selected' : ''}>Administrator</option>
+      </select>
+      <small style="color:var(--text-muted); font-size:0.75rem; display:block; margin-top:4px;">
+        <i class="fas fa-info-circle"></i> Tentukan hak akses akun: Guru Mapel, Guru BK, atau Administrator.
+      </small>
     </div>
-    <div class="form-group">
-      <label class="form-label" for="edit-user-role">Peran (Role) ${isRoleLocked ? '<span style="color:var(--text-muted); font-size:0.75rem;">(Terkunci)</span>' : ''}</label>
-      ${isRoleLocked ? `
-        <input type="hidden" id="edit-user-role" value="${user.role}">
-        <input type="text" class="form-control" value="${user.role === 'admin' ? (isTargetPrimary ? 'Super Admin (Akun Utama)' : 'Administrator') : 'Guru'}" disabled style="background-color:var(--bg-secondary); cursor:not-allowed;">
-        ${!isPrimaryAdmin ? '<small style="color:var(--text-muted); font-size:0.75rem; display:block; margin-top:4px;"><i class="fas fa-info-circle"></i> Hanya Akun Utama yang berhak mengubah peran akun.</small>' : ''}
-      ` : `
-        <select id="edit-user-role" class="form-control" required>
-          <option value="guru" ${user.role === 'guru' ? 'selected' : ''}>Guru</option>
-          <option value="admin" ${user.role === 'admin' ? 'selected' : ''}>Administrator</option>
-        </select>
-      `}
-      ${isTargetPrimary ? '<small style="color:var(--text-muted); font-size:0.75rem; display:block; margin-top:4px;"><i class="fas fa-info-circle"></i> Peran Akun Utama selalu Administrator dan tidak dapat diubah.</small>' : ''}
+    <div class="form-group" id="group-edit-user-kelas-wali">
+      <label class="form-label" for="edit-user-kelas-wali">Penugasan Wali Kelas</label>
+      <select id="edit-user-kelas-wali" class="form-control">
+        <option value="">— Bukan Wali Kelas —</option>
+        ${(db.kelas || []).map(k => {
+          const isSelected = String(k.id) === String(currentAssignedId);
+          const currentHolder = k.waliKelas && (!k.waliKelasEmail || k.waliKelasEmail.toLowerCase() !== user.email.toLowerCase()) ? ` (Saat ini: ${escapeHtml(k.waliKelas)})` : '';
+          return `<option value="${k.id}" ${isSelected ? 'selected' : ''}>Kelas ${escapeHtml(k.nama)}${currentHolder}</option>`;
+        }).join("")}
+      </select>
+      <small style="color:var(--text-muted); font-size:0.75rem; display:block; margin-top:4px;">
+        <i class="fas fa-info-circle"></i> Jika akun guru ditugaskan sebagai wali kelas, Mode Wali Kelas otomatis aktif dan langsung terkoneksi ke kelas ini.
+      </small>
     </div>
   `;
 
@@ -10622,35 +11973,17 @@ async function submitEditUser() {
   let email = document.getElementById("edit-user-email").value.trim().toLowerCase();
   const nama = document.getElementById("edit-user-nama").value.trim();
   const password = document.getElementById("edit-user-password").value.trim();
-  let role = document.getElementById("edit-user-role").value;
+  const roleInput = document.getElementById("edit-user-role");
+  let role = roleInput ? roleInput.value : "guru";
+  const kelasWaliId = document.getElementById("edit-user-kelas-wali") ? document.getElementById("edit-user-kelas-wali").value : "";
 
   const session = getSession();
   const currentEmail = session ? session.email.toLowerCase() : "";
   const isPrimaryAdmin = currentEmail === "admin@smansaku.id";
   const isTargetPrimary = oldEmail === "admin@smansaku.id";
+  const hidePassword = isTargetPrimary && !isPrimaryAdmin;
 
-  if (isTargetPrimary && !isPrimaryAdmin) {
-    alert("Akses ditolak: Hanya Akun Utama yang dapat memperbarui data admin@smansaku.id!");
-    return;
-  }
-
-  // Akun utama (admin@smansaku.id) email dan peran tidak pernah boleh diubah
-  if (isTargetPrimary) {
-    email = "admin@smansaku.id";
-    role = "admin";
-  }
-
-  // Jika bukan primary admin, tidak boleh mengangkat akun menjadi admin
-  if (!isPrimaryAdmin && role === "admin") {
-    const usersCheck = await getRegisteredUsers();
-    const existing = usersCheck.find(u => u.email.toLowerCase() === oldEmail);
-    if (!existing || existing.role !== "admin") {
-      alert("Hanya Akun Utama (admin@smansaku.id) yang dapat menetapkan peran Administrator!");
-      return;
-    }
-  }
-
-  if (!email || !nama || !password) {
+  if (!email || !nama || (!password && !hidePassword)) {
     alert("Semua field wajib diisi!");
     return;
   }
@@ -10668,59 +12001,107 @@ async function submitEditUser() {
   }
 
   const userIdx = users.findIndex(u => u.email.toLowerCase() === oldEmail);
-  if (userIdx !== -1) {
-    // If email changes, migrate database key in localStorage
-    if (email !== oldEmail) {
-      const oldKey = "saku_guru_db_" + oldEmail.replace(/[^a-z0-9]/g, "_");
-      const newKey = "saku_guru_db_" + email.replace(/[^a-z0-9]/g, "_");
-      const oldData = localStorage.getItem(oldKey);
-      if (oldData) {
-        localStorage.setItem(newKey, oldData);
-        localStorage.removeItem(oldKey);
-      }
-    }
-
-    // Save to Supabase cloud if available
-    if (isCloudMode && supabase) {
-      try {
-        if (email !== oldEmail) {
-          // Supabase Safe Migration: Write-Before-Delete
-          const { data: dbRow } = await supabase.from("saku_guru_databases").select("data").eq("email", oldEmail).maybeSingle();
-          const oldDbData = dbRow ? dbRow.data : null;
-
-          await supabase.from("saku_guru_users").insert({ email, nama, password, role });
-
-          if (oldDbData) {
-            await supabase.from("saku_guru_databases").upsert({ email, data: oldDbData, updated_at: new Date().toISOString() }, { onConflict: "email" });
-          }
-
-          await supabase.from("saku_guru_users").delete().eq("email", oldEmail);
-          if (oldDbData) {
-            await supabase.from("saku_guru_databases").delete().eq("email", oldEmail);
-          }
-        } else {
-          await supabase.from("saku_guru_users").update({ nama, password, role }).eq("email", email);
-        }
-      } catch(e) {
-        console.error("Supabase submitEditUser error:", e);
-      }
-    }
-
-    // If the edited user is the current session user, update the session name/role too
-    if (session && session.email.toLowerCase() === oldEmail) {
-      session.email = email;
-      session.nama = nama;
-      session.role = role;
-      setSession(session);
-      updateHeaderProfile();
-    }
-
-    users[userIdx] = { email, nama, password, role };
-    await saveRegisteredUsers(users);
-    closeModal();
-    await loadUsersTable();
-    showToast(`Akun ${nama} berhasil diperbarui!`);
+  if (userIdx === -1) {
+    alert("Data akun tidak ditemukan!");
+    return;
   }
+
+  const targetUser = users[userIdx];
+  const finalPassword = hidePassword ? targetUser.password : password;
+
+  // Proteksi: Jika peran Administrator diubah menjadi non-admin, pastikan masih ada setidaknya 1 Administrator lain di sistem
+  if (targetUser.role === "admin" && role !== "admin") {
+    const otherAdmins = users.filter(u => u.role === "admin" && u.email.toLowerCase() !== oldEmail);
+    if (otherAdmins.length === 0) {
+      alert("Tidak dapat mengubah peran ini menjadi non-administrator karena harus ada setidaknya 1 akun Administrator aktif di sistem!");
+      return;
+    }
+  }
+
+  // Akun utama (admin@smansaku.id) email tidak pernah boleh diubah
+  if (isTargetPrimary) {
+    email = "admin@smansaku.id";
+  }
+
+  // If email changes, migrate database key in localStorage
+  if (email !== oldEmail) {
+    const oldKey = "saku_guru_db_" + oldEmail.replace(/[^a-z0-9]/g, "_");
+    const newKey = "saku_guru_db_" + email.replace(/[^a-z0-9]/g, "_");
+    const oldData = localStorage.getItem(oldKey);
+    if (oldData) {
+      localStorage.setItem(newKey, oldData);
+      localStorage.removeItem(oldKey);
+    }
+  }
+
+  // Save to Supabase cloud if available
+  if (isCloudMode && supabase) {
+    try {
+      if (email !== oldEmail) {
+        // Supabase Safe Migration: Write-Before-Delete
+        const { data: dbRow } = await supabase.from("saku_guru_databases").select("data").eq("email", oldEmail).maybeSingle();
+        const oldDbData = dbRow ? dbRow.data : null;
+
+        await supabase.from("saku_guru_users").insert({ email, nama, password: finalPassword, role });
+
+        if (oldDbData) {
+          await supabase.from("saku_guru_databases").upsert({ email, data: oldDbData, updated_at: new Date().toISOString() }, { onConflict: "email" });
+        }
+
+        await supabase.from("saku_guru_users").delete().eq("email", oldEmail);
+        if (oldDbData) {
+          await supabase.from("saku_guru_databases").delete().eq("email", oldEmail);
+        }
+      } else {
+        await supabase.from("saku_guru_users").update({ nama, password: finalPassword, role }).eq("email", email);
+      }
+    } catch(e) {
+      console.error("Supabase submitEditUser error:", e);
+    }
+  }
+
+  // Sinkronisasi kelas binaan di db.kelas
+  (db.kelas || []).forEach(k => {
+    if (k.waliKelasEmail && k.waliKelasEmail.toLowerCase() === oldEmail.toLowerCase()) {
+      k.waliKelasEmail = "";
+      k.waliKelas = "";
+    }
+  });
+
+  if (kelasWaliId) {
+    const targetK = (db.kelas || []).find(k => String(k.id) === String(kelasWaliId));
+    if (targetK) {
+      targetK.waliKelasEmail = email;
+      targetK.waliKelas = nama;
+    }
+  }
+  await saveDatabase(true);
+  await distributeMasterClassesToAllTeachers(db.kelas, db.siswa);
+
+  // Perbarui objek di array users
+  users[userIdx] = { ...users[userIdx], email, nama, password: finalPassword, role, kelasWaliId };
+  await saveRegisteredUsers(users);
+
+  // If the edited user is the current session user, update session
+  if (session && session.email.toLowerCase() === oldEmail.toLowerCase()) {
+    session.email = email;
+    session.nama = nama;
+    session.role = role;
+    session.kelasWaliId = kelasWaliId;
+    setSession(session);
+    updateHeaderProfile();
+    initAppMode();
+  }
+
+  closeModal();
+  await loadUsersTable();
+  initAppMode();
+
+  let roleLabel = "Guru Mapel";
+  if (role === "admin") roleLabel = "Administrator";
+  else if (role === "guru_bk") roleLabel = "Guru BK";
+
+  showToast(`Akun ${nama} berhasil diperbarui (Peran: ${roleLabel})!`);
 }
 
 // Delete User
@@ -11078,23 +12459,108 @@ function getAppMode() {
 }
 
 function initAppMode() {
+  const session = getSession();
+  const userRole = session ? session.role : "guru";
+  const allowedModes = getAllowedModesForRole(userRole, session);
+
   const savedMode = localStorage.getItem("sman_saku_mode");
-  if (savedMode && ["mapel", "walikelas", "guruwali"].includes(savedMode)) {
+  if (savedMode && allowedModes.includes(savedMode)) {
     currentAppMode = savedMode;
   } else {
-    currentAppMode = "mapel";
+    // Default to first allowed mode for this user's role (e.g. gurubk for guru_bk, mapel for guru)
+    currentAppMode = allowedModes[0];
+    localStorage.setItem("sman_saku_mode", currentAppMode);
   }
 
-  // Self-repair DB structures for Wali Kelas & Guru Wali
+  // Self-repair DB structures for Wali Kelas, Guru Wali, & Guru BK
   if (typeof db !== "undefined" && db) {
     db.catatanWali = db.catatanWali || [];
     db.siswaAsuhan = db.siswaAsuhan || [];
     db.jurnalBimbingan = db.jurnalBimbingan || [];
     db.academicFollowUp = db.academicFollowUp || {};
+    db.layananBK = db.layananBK || [];
+    db.peminatanKarirBK = db.peminatanKarirBK || [];
+    db.agendaBK = db.agendaBK || [];
+    db.kelasBimbinganBK = db.kelasBimbinganBK || [];
 
-    if (db.siswaAsuhan.length === 0 && (db.siswa && db.siswa.length > 0)) {
+    const assignedClass = session ? getAssignedWaliKelas(session) : null;
+    if (assignedClass) {
+      const classStudents = getStudentsForClass(assignedClass.id);
+      if (classStudents && classStudents.length > 0) {
+        const validAsuhan = db.siswaAsuhan.filter(id => db.siswa.some(s => s.id === id));
+        if (validAsuhan.length === 0) {
+          db.siswaAsuhan = classStudents.map(s => s.id);
+        }
+      }
+    } else if (db.siswaAsuhan.length === 0 && (db.siswa && db.siswa.length > 0)) {
       const candidates = ["s-3", "s-5", "s-8"].filter(id => db.siswa.some(s => s.id === id));
       db.siswaAsuhan = candidates.length > 0 ? candidates : db.siswa.slice(0, 3).map(s => s.id);
+    }
+
+    // Default kelas bimbingan BK to all classes if empty and classes exist
+    if (db.kelasBimbinganBK.length === 0 && (db.kelas && db.kelas.length > 0)) {
+      db.kelasBimbinganBK = db.kelas.map(k => k.id);
+    }
+
+    // Seed realistic sample BK data if empty and students exist
+    if (db.layananBK.length === 0 && (db.siswa && db.siswa.length > 0)) {
+      const s1 = db.siswa[0];
+      const s2 = db.siswa[1] || db.siswa[0];
+      const today = getLocalDateString();
+      db.layananBK = [
+        {
+          id: "bk-sample-1",
+          tanggal: today,
+          waktu: "08:30",
+          siswaId: s1.id,
+          kelasId: s1.kelasId || "",
+          bidang: "Belajar",
+          jenisLayanan: "Konseling Individu",
+          urgensi: "Sedang",
+          sumber: "Rujukan Wali Kelas",
+          gejala: "Kesulitan konsentrasi saat jam belajar dan motivasi menurun.",
+          uraian: "Siswa diajak mengeksplorasi gaya belajar yang cocok, penyebab kejenuhan, dan menyusun target harian realistis.",
+          tindakLanjut: "Pembuatan jadwal belajar mandiri di rumah dan pemantauan berkala Guru BK.",
+          status: "Dalam Proses",
+          catatan: "Siswa kooperatif dan berjanji memperbaiki ritme belajar.",
+          createdAt: new Date().toISOString()
+        },
+        {
+          id: "bk-sample-2",
+          tanggal: today,
+          waktu: "10:15",
+          siswaId: s2.id,
+          kelasId: s2.kelasId || "",
+          bidang: "Karir",
+          jenisLayanan: "Konseling Individu",
+          urgensi: "Biasa",
+          sumber: "Inisiatif Siswa (Sukarela)",
+          gejala: "Konsultasi pemilihan jurusan perguruan tinggi negeri (SNBP / SNBT).",
+          uraian: "Menganalisis ledger nilai semester 1-4, minat bakat, dan peluang keketatan program studi yang diminati.",
+          tindakLanjut: "Mengarahkan siswa mengikuti asesmen minat bakat karir dan diskusi lanjutan bersama orang tua.",
+          status: "Tuntas",
+          catatan: "Siswa mantap memilih rumpun Saintek/Teknik dan mempersiapkan portofolio.",
+          createdAt: new Date().toISOString()
+        }
+      ];
+    }
+
+    if (db.agendaBK.length === 0 && (db.siswa && db.siswa.length > 0)) {
+      const s1 = db.siswa[0];
+      const today = getLocalDateString();
+      db.agendaBK = [
+        {
+          id: "ag-sample-1",
+          tanggal: today,
+          waktu: "13:00",
+          siswaId: s1.id,
+          kegiatan: "Sesi Konseling Lanjutan & Evaluasi RTL",
+          tempat: "Ruang BK",
+          status: "Terjadwal",
+          keterangan: "Evaluasi perkembangan jadwal belajar mandiri dan koordinasi tugas sekolah.",
+          createdAt: new Date().toISOString()
+        }
+      ];
     }
   }
 
@@ -11117,6 +12583,7 @@ function toggleModeDropdown(event) {
   if (!dropdown) return;
   const isHidden = dropdown.style.display === "none" || !dropdown.style.display;
   if (isHidden) {
+    updateModeSwitcherUI(currentAppMode);
     dropdown.style.display = "block";
     if (container) container.classList.add("open");
   } else {
@@ -11132,7 +12599,14 @@ function closeModeDropdown() {
 }
 
 function setAppMode(mode) {
-  if (!["mapel", "walikelas", "guruwali"].includes(mode)) return;
+  const session = getSession();
+  const userRole = session ? session.role : "guru";
+  const allowedModes = getAllowedModesForRole(userRole, session);
+
+  if (!allowedModes.includes(mode)) {
+    showToast("Akses ditolak: Mode ini tidak tersedia untuk jenis akun Anda.");
+    return;
+  }
   currentAppMode = mode;
   localStorage.setItem("sman_saku_mode", mode);
   closeModeDropdown();
@@ -11142,12 +12616,17 @@ function setAppMode(mode) {
   let toastMsg = "Beralih ke Mode Guru Mapel";
   if (mode === "walikelas") toastMsg = "Beralih ke Mode Wali Kelas";
   if (mode === "guruwali") toastMsg = "Beralih ke Mode Guru Wali";
+  if (mode === "gurubk") toastMsg = "Beralih ke Mode Guru BK (Bimbingan Konseling)";
   showToast(toastMsg);
 
   navigate("dashboard");
 }
 
 function updateModeSwitcherUI(mode) {
+  const session = getSession();
+  const userRole = session ? session.role : "guru";
+  const allowedModes = getAllowedModesForRole(userRole, session);
+
   const btn = document.getElementById("btn-switch-mode");
   const icon = document.getElementById("mode-icon");
   const title = document.getElementById("mode-active-title");
@@ -11161,6 +12640,8 @@ function updateModeSwitcherUI(mode) {
       icon.className = "fas fa-user-tie";
     } else if (mode === "guruwali") {
       icon.className = "fas fa-hand-holding-heart";
+    } else if (mode === "gurubk") {
+      icon.className = "fas fa-user-shield";
     } else {
       icon.className = "fas fa-chalkboard-user";
     }
@@ -11171,6 +12652,8 @@ function updateModeSwitcherUI(mode) {
       title.textContent = "Wali Kelas";
     } else if (mode === "guruwali") {
       title.textContent = "Guru Wali";
+    } else if (mode === "gurubk") {
+      title.textContent = "Guru BK";
     } else {
       title.textContent = "Guru Mapel";
     }
@@ -11178,17 +12661,35 @@ function updateModeSwitcherUI(mode) {
 
   document.querySelectorAll(".mode-dropdown-item").forEach(item => {
     const itemMode = item.getAttribute("data-mode");
+    // Sembunyikan mode yang tidak diizinkan untuk peran akun ini
+    if (!allowedModes.includes(itemMode)) {
+      item.style.display = "none";
+      return;
+    }
+    item.style.display = "flex";
+
     if (itemMode === mode) {
       item.classList.add("active");
       const badge = item.querySelector(".item-badge");
-      if (badge) badge.textContent = "Aktif";
+      if (badge) {
+        if (itemMode === "walikelas") {
+          const assigned = getAssignedWaliKelas(session);
+          badge.textContent = assigned ? `Aktif (${assigned.nama})` : "Aktif";
+        } else {
+          badge.textContent = "Aktif";
+        }
+      }
     } else {
       item.classList.remove("active");
       const badge = item.querySelector(".item-badge");
       if (badge) {
         if (itemMode === "mapel") badge.textContent = "Mapel";
-        if (itemMode === "walikelas") badge.textContent = "Kelas Binaan";
+        if (itemMode === "walikelas") {
+          const assigned = getAssignedWaliKelas(session);
+          badge.textContent = assigned ? `Kelas ${assigned.nama}` : "Kelas Binaan";
+        }
         if (itemMode === "guruwali") badge.textContent = "Mentor Asuhan";
+        if (itemMode === "gurubk") badge.textContent = "Konseling & Karir";
       }
     }
   });
@@ -11198,6 +12699,8 @@ function renderSidebarMenu() {
   const menuList = document.getElementById("sidebar-menu-list");
   if (!menuList) return;
 
+  const session = getSession();
+  const isAdmin = session && session.role === "admin";
   const currentHash = window.location.hash.substring(1) || "dashboard";
 
   let items = [];
@@ -11209,6 +12712,7 @@ function renderSidebarMenu() {
       { page: "ledger_nilai", icon: "fas fa-table-list", label: "Ledger Nilai" },
       { page: "catatan_wali", icon: "fas fa-book-bookmark", label: "Buku Kasus" },
       { page: "kontak", icon: "fas fa-address-book", label: "Kontak Wali" },
+      ...(isAdmin ? [{ page: "akun", icon: "fas fa-users-cog", label: "Kelola Akun" }] : []),
       { page: "profil", icon: "fas fa-user-cog", label: "Profil" }
     ];
   } else if (currentAppMode === "guruwali") {
@@ -11219,6 +12723,20 @@ function renderSidebarMenu() {
       { page: "jurnal_bimbingan", icon: "fas fa-hand-holding-heart", label: "Bimbingan" },
       { page: "pantauan_absensi", icon: "fas fa-clipboard-user", label: "Presensi" },
       { page: "kontak", icon: "fas fa-address-book", label: "Kontak Wali" },
+      ...(isAdmin ? [{ page: "akun", icon: "fas fa-users-cog", label: "Kelola Akun" }] : []),
+      { page: "profil", icon: "fas fa-user-cog", label: "Profil" }
+    ];
+  } else if (currentAppMode === "gurubk") {
+    items = [
+      { page: "dashboard", icon: "fas fa-chart-pie", label: "Dashboard BK" },
+      { page: "kelas_bimbingan", icon: "fas fa-chalkboard-user", label: "Kelas Bimbingan" },
+      { page: "konseling_bk", icon: "fas fa-comments", label: "Layanan Konseling" },
+      { page: "peta_kerawanan", icon: "fas fa-triangle-exclamation", label: "Peta Kerawanan" },
+      { page: "karir_bk", icon: "fas fa-compass", label: "Peminatan & Karir" },
+      { page: "agenda_bk", icon: "fas fa-calendar-check", label: "Agenda & Jadwal" },
+      { page: "rekap_bk", icon: "fas fa-file-lines", label: "Laporan BK" },
+      { page: "kontak", icon: "fas fa-address-book", label: "Kontak Wali" },
+      ...(isAdmin ? [{ page: "akun", icon: "fas fa-users-cog", label: "Kelola Akun" }] : []),
       { page: "profil", icon: "fas fa-user-cog", label: "Profil" }
     ];
   } else {
@@ -11232,6 +12750,7 @@ function renderSidebarMenu() {
       { page: "nilai", icon: "fas fa-award", label: "Nilai Siswa" },
       { page: "jurnal", icon: "fas fa-book-open", label: "Jurnal" },
       { page: "rekap", icon: "fas fa-print", label: "Rekap" },
+      ...(isAdmin ? [{ page: "akun", icon: "fas fa-users-cog", label: "Kelola Akun" }] : []),
       { page: "profil", icon: "fas fa-user-cog", label: "Profil" }
     ];
   }
@@ -11269,24 +12788,46 @@ let currentWaliKelasYear = new Date().getFullYear();
 
 function getWaliKelasClassId() {
   if (!db.kelas || db.kelas.length === 0) return "";
+
+  const session = getSession();
+  const isAdmin = session && session.role === "admin";
+
+  // Jika akun adalah guru wali kelas (bukan admin), LANGSUNG TERKONEKSI ke kelas yang ditetapkan admin
+  if (!isAdmin && session) {
+    const assignedClass = getAssignedWaliKelas(session);
+    if (assignedClass) {
+      currentWaliKelasClassId = assignedClass.id;
+      localStorage.setItem("sman_saku_walikelas_kelasId", assignedClass.id);
+      return assignedClass.id;
+    }
+  }
+
+  // Jika Administrator atau fallback
   if (currentWaliKelasClassId && db.kelas.some(k => k.id === currentWaliKelasClassId)) {
     return currentWaliKelasClassId;
   }
-  const teacherName = (db.guruProfile && db.guruProfile.nama) ? db.guruProfile.nama.trim().toLowerCase() : "";
-  if (teacherName) {
-    const match = db.kelas.find(k => k.waliKelas && k.waliKelas.trim().toLowerCase().includes(teacherName));
-    if (match) {
-      currentWaliKelasClassId = match.id;
-      localStorage.setItem("sman_saku_walikelas_kelasId", match.id);
-      return match.id;
-    }
-  }
+  
   currentWaliKelasClassId = db.kelas[0].id;
   localStorage.setItem("sman_saku_walikelas_kelasId", currentWaliKelasClassId);
   return currentWaliKelasClassId;
 }
 
 function setWaliKelasClassId(classId) {
+  const session = getSession();
+  const isAdmin = session && session.role === "admin";
+
+  // Jika bukan admin dan merupakan guru wali kelas, kelas terkunci pada kelas binaannya
+  if (!isAdmin && session) {
+    const assignedClass = getAssignedWaliKelas(session);
+    if (assignedClass) {
+      currentWaliKelasClassId = assignedClass.id;
+      localStorage.setItem("sman_saku_walikelas_kelasId", assignedClass.id);
+      const activePage = window.location.hash.substring(1) || "dashboard";
+      renderPage(activePage);
+      return;
+    }
+  }
+
   currentWaliKelasClassId = classId;
   localStorage.setItem("sman_saku_walikelas_kelasId", classId);
   const activePage = window.location.hash.substring(1) || "dashboard";
@@ -11302,9 +12843,11 @@ function changeWaliKelasDate(dateVal) {
 }
 
 function renderDashboardWaliKelas(container) {
+  const session = getSession();
+  const isAdmin = session && session.role === "admin";
   const classId = getWaliKelasClassId();
   const kelas = db.kelas.find(k => k.id === classId) || { nama: "Kelas Tidak Ditemukan", tingkat: "-" };
-  const students = db.siswa.filter(s => s.kelasId === classId);
+  const students = getStudentsForClass(classId);
   
   // Ambil absensi kelas ini pada tanggal terpilih
   const absensiToday = (db.absensi || []).filter(a => a.kelasId === classId && a.tanggal === currentWaliKelasDate);
@@ -11366,9 +12909,15 @@ function renderDashboardWaliKelas(container) {
             <label style="font-size: 0.75rem; font-weight: 700; color: var(--text-muted); display: block; margin-bottom: 4px; text-transform: uppercase;">
               <i class="fas fa-school"></i> Kelas Binaan Anda:
             </label>
-            <select class="form-control" style="font-weight: 600; width: 100%; min-width: 130px;" onchange="setWaliKelasClassId(this.value)">
-              ${kelasOptions}
-            </select>
+            ${!isAdmin ? `
+              <div style="display:flex; align-items:center; gap:8px; background:rgba(16,185,129,0.08); border:1px solid rgba(16,185,129,0.25); border-radius:6px; padding:7px 12px; font-weight:700; color:#059669; font-size:0.95rem; min-height:42px;">
+                <i class="fas fa-lock" style="font-size:0.85rem;"></i> Kelas ${escapeHtml(kelas.nama)}
+              </div>
+            ` : `
+              <select class="form-control" style="font-weight: 600; width: 100%; min-width: 130px;" onchange="setWaliKelasClassId(this.value)">
+                ${kelasOptions}
+              </select>
+            `}
           </div>
           <div style="flex: 1 1 130px; min-width: 130px;">
             <label style="font-size: 0.75rem; font-weight: 700; color: var(--text-muted); display: block; margin-bottom: 4px; text-transform: uppercase;">
@@ -11525,7 +13074,7 @@ function renderDashboardWaliKelas(container) {
 
 function shareWaliKelasDailyRecapWA(classId, dateStr) {
   const kelas = db.kelas.find(k => k.id === classId) || { nama: "Kelas", tingkat: "-" };
-  const students = db.siswa.filter(s => s.kelasId === classId);
+  const students = getStudentsForClass(classId);
   const absensiRecords = (db.absensi || []).filter(a => a.kelasId === classId && a.tanggal === dateStr);
   const teacherName = (db.guruProfile && db.guruProfile.nama) ? db.guruProfile.nama : (kelas.waliKelas || "Wali Kelas");
 
@@ -11657,9 +13206,11 @@ SMA Negeri Saku`;
 }
 
 function renderRekapFinalWaliKelas(container) {
+  const session = getSession();
+  const isAdmin = session && session.role === "admin";
   const classId = getWaliKelasClassId();
   const kelas = db.kelas.find(k => k.id === classId) || { nama: "Kelas", tingkat: "-" };
-  const students = db.siswa.filter(s => s.kelasId === classId);
+  const students = getStudentsForClass(classId);
 
   const bulanNames = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"];
   
@@ -11719,9 +13270,15 @@ function renderRekapFinalWaliKelas(container) {
         <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
           <div>
             <label style="font-size: 0.76rem; font-weight: 700; color: var(--text-muted); display: block; margin-bottom: 4px;">PILIH KELAS:</label>
-            <select class="form-control" style="font-weight: 600;" onchange="setWaliKelasClassId(this.value)">
-              ${kelasOptions}
-            </select>
+            ${!isAdmin ? `
+              <div style="font-weight: 700; color: #059669; padding: 7px 12px; background: rgba(16,185,129,0.08); border: 1px solid rgba(16,185,129,0.25); border-radius: 6px; font-size: 0.9rem; display: inline-flex; align-items: center; gap: 6px; min-height: 38px;">
+                <i class="fas fa-lock" style="font-size: 0.8rem;"></i> Kelas ${escapeHtml(kelas.nama)}
+              </div>
+            ` : `
+              <select class="form-control" style="font-weight: 600;" onchange="setWaliKelasClassId(this.value)">
+                ${kelasOptions}
+              </select>
+            `}
           </div>
           <div>
             <label style="font-size: 0.76rem; font-weight: 700; color: var(--text-muted); display: block; margin-bottom: 4px;">BULAN:</label>
@@ -11806,7 +13363,7 @@ function renderRekapFinalWaliKelas(container) {
 function exportRekapFinalWaliKelasCSV() {
   const classId = getWaliKelasClassId();
   const kelas = db.kelas.find(k => k.id === classId) || { nama: "Kelas" };
-  const students = db.siswa.filter(s => s.kelasId === classId);
+  const students = getStudentsForClass(classId);
   const bulanNames = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"];
   
   const monthStr = String(currentWaliKelasMonth + 1).padStart(2, "0");
@@ -11840,9 +13397,11 @@ function exportRekapFinalWaliKelasCSV() {
 }
 
 function renderSiswaKelasWaliKelas(container) {
+  const session = getSession();
+  const isAdmin = session && session.role === "admin";
   const classId = getWaliKelasClassId();
   const kelas = db.kelas.find(k => k.id === classId) || { nama: "Kelas", tingkat: "-" };
-  const students = db.siswa.filter(s => s.kelasId === classId);
+  const students = getStudentsForClass(classId);
 
   const kelasOptions = db.kelas.map(k => `
     <option value="${k.id}" ${k.id === classId ? 'selected' : ''}>${k.tingkat ? k.tingkat + ' - ' : ''}${k.nama}</option>
@@ -11854,9 +13413,15 @@ function renderSiswaKelasWaliKelas(container) {
         <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap; flex: 1 1 280px;">
           <div style="flex: 1 1 140px; min-width: 130px;">
             <label style="font-size: 0.76rem; font-weight: 700; color: var(--text-muted); display: block; margin-bottom: 4px;">PILIH KELAS BINAAN:</label>
-            <select class="form-control" style="font-weight: 600; width: 100%; min-width: 130px;" onchange="setWaliKelasClassId(this.value)">
-              ${kelasOptions}
-            </select>
+            ${!isAdmin ? `
+              <div style="font-weight: 700; color: #059669; padding: 7px 12px; background: rgba(16,185,129,0.08); border: 1px solid rgba(16,185,129,0.25); border-radius: 6px; font-size: 0.9rem; display: inline-flex; align-items: center; gap: 6px; min-height: 38px;">
+                <i class="fas fa-lock" style="font-size: 0.8rem;"></i> Kelas ${escapeHtml(kelas.nama)}
+              </div>
+            ` : `
+              <select class="form-control" style="font-weight: 600; width: 100%; min-width: 130px;" onchange="setWaliKelasClassId(this.value)">
+                ${kelasOptions}
+              </select>
+            `}
           </div>
           <div style="flex: 1 1 140px; min-width: 130px;">
             <label style="font-size: 0.76rem; font-weight: 700; color: var(--text-muted); display: block; margin-bottom: 4px;">CARI SISWA:</label>
@@ -11953,9 +13518,11 @@ function filterSiswaKelasWaliTable() {
 }
 
 function renderLedgerNilaiWaliKelas(container) {
+  const session = getSession();
+  const isAdmin = session && session.role === "admin";
   const classId = getWaliKelasClassId();
   const kelas = db.kelas.find(k => k.id === classId) || { nama: "Kelas", tingkat: "-" };
-  const students = db.siswa.filter(s => s.kelasId === classId);
+  const students = getStudentsForClass(classId);
   const mapelList = db.mapel || ["Matematika", "Fisika", "Kimia", "Biologi", "Bahasa Indonesia", "Bahasa Inggris"];
 
   // Hitung rata-rata per mapel untuk setiap siswa
@@ -11998,10 +13565,18 @@ function renderLedgerNilaiWaliKelas(container) {
     <div class="card" style="margin-bottom: 20px;">
       <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 14px;">
         <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap; flex: 1 1 200px;">
-          <label style="font-size: 0.76rem; font-weight: 700; color: var(--text-muted); display: block; margin-bottom: 4px;">PILIH KELAS BINAAN:</label>
-          <select class="form-control" style="font-weight: 600; width: 100%; min-width: 130px;" onchange="setWaliKelasClassId(this.value)">
-            ${kelasOptions}
-          </select>
+          <div>
+            <label style="font-size: 0.76rem; font-weight: 700; color: var(--text-muted); display: block; margin-bottom: 4px;">PILIH KELAS BINAAN:</label>
+            ${!isAdmin ? `
+              <div style="font-weight: 700; color: #059669; padding: 7px 12px; background: rgba(16,185,129,0.08); border: 1px solid rgba(16,185,129,0.25); border-radius: 6px; font-size: 0.9rem; display: inline-flex; align-items: center; gap: 6px; min-height: 38px;">
+                <i class="fas fa-lock" style="font-size: 0.8rem;"></i> Kelas ${escapeHtml(kelas.nama)}
+              </div>
+            ` : `
+              <select class="form-control" style="font-weight: 600; width: 100%; min-width: 130px;" onchange="setWaliKelasClassId(this.value)">
+                ${kelasOptions}
+              </select>
+            `}
+          </div>
         </div>
         <div style="display: flex; gap: 10px;">
           <button type="button" class="btn btn-secondary" onclick="window.print()">
@@ -12064,7 +13639,7 @@ function renderLedgerNilaiWaliKelas(container) {
 function exportLedgerNilaiCSV() {
   const classId = getWaliKelasClassId();
   const kelas = db.kelas.find(k => k.id === classId) || { nama: "Kelas" };
-  const students = db.siswa.filter(s => s.kelasId === classId);
+  const students = getStudentsForClass(classId);
   const mapelList = db.mapel || ["Matematika", "Fisika", "Kimia", "Biologi", "Bahasa Indonesia", "Bahasa Inggris"];
 
   const ledgerData = students.map(s => {
@@ -12101,9 +13676,11 @@ function exportLedgerNilaiCSV() {
 }
 
 function renderCatatanWaliKelas(container) {
+  const session = getSession();
+  const isAdmin = session && session.role === "admin";
   const classId = getWaliKelasClassId();
   const kelas = db.kelas.find(k => k.id === classId) || { nama: "Kelas", tingkat: "-" };
-  const students = db.siswa.filter(s => s.kelasId === classId);
+  const students = getStudentsForClass(classId);
   const studentIds = students.map(s => s.id);
 
   // Ambil catatan pembinaan untuk siswa di kelas ini
@@ -12118,10 +13695,18 @@ function renderCatatanWaliKelas(container) {
     <div class="card" style="margin-bottom: 20px;">
       <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 14px;">
         <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap; flex: 1 1 200px;">
-          <label style="font-size: 0.76rem; font-weight: 700; color: var(--text-muted); display: block; margin-bottom: 4px;">PILIH KELAS BINAAN:</label>
-          <select class="form-control" style="font-weight: 600; width: 100%; min-width: 130px;" onchange="setWaliKelasClassId(this.value)">
-            ${kelasOptions}
-          </select>
+          <div>
+            <label style="font-size: 0.76rem; font-weight: 700; color: var(--text-muted); display: block; margin-bottom: 4px;">PILIH KELAS BINAAN:</label>
+            ${!isAdmin ? `
+              <div style="font-weight: 700; color: #059669; padding: 7px 12px; background: rgba(16,185,129,0.08); border: 1px solid rgba(16,185,129,0.25); border-radius: 6px; font-size: 0.9rem; display: inline-flex; align-items: center; gap: 6px; min-height: 38px;">
+                <i class="fas fa-lock" style="font-size: 0.8rem;"></i> Kelas ${escapeHtml(kelas.nama)}
+              </div>
+            ` : `
+              <select class="form-control" style="font-weight: 600; width: 100%; min-width: 130px;" onchange="setWaliKelasClassId(this.value)">
+                ${kelasOptions}
+              </select>
+            `}
+          </div>
         </div>
         <div>
           <button type="button" class="btn btn-primary" onclick="openCatatanWaliModal()">
@@ -12204,7 +13789,7 @@ function renderCatatanWaliKelas(container) {
 
 function openCatatanWaliModal(catatanId = null, defaultSiswaId = null) {
   const classId = getWaliKelasClassId();
-  const students = db.siswa.filter(s => s.kelasId === classId);
+  const students = getStudentsForClass(classId);
   const existing = catatanId ? (db.catatanWali || []).find(c => c.id === catatanId) : null;
 
   const activeSiswaId = existing ? existing.siswaId : (defaultSiswaId || (students[0]?.id || ""));
@@ -12394,7 +13979,43 @@ SMA Negeri Saku`;
 
 function getSiswaAsuhanList() {
   db.siswaAsuhan = db.siswaAsuhan || [];
-  return (db.siswa || []).filter(s => db.siswaAsuhan.includes(s.id));
+  db.siswa = db.siswa || [];
+
+  // Filter siswa yang benar-benar ada di db.siswa
+  let list = db.siswa.filter(s => db.siswaAsuhan.includes(s.id));
+
+  // Jika daftar siswa asuhan masih kosong atau tidak ada ID yang cocok:
+  if (list.length === 0) {
+    const session = getSession();
+    if (session) {
+      // 1. Cek jika guru ini ditugaskan sebagai Wali Kelas
+      const assignedClass = getAssignedWaliKelas(session);
+      if (assignedClass) {
+        const classStudents = getStudentsForClass(assignedClass.id);
+        if (classStudents && classStudents.length > 0) {
+          db.siswaAsuhan = classStudents.map(s => s.id);
+          try { saveDatabase(false); } catch(e) {}
+          return classStudents;
+        }
+      }
+
+      // 2. Fallback untuk Guru BK jika siswaAsuhan masih kosong
+      if (session.role === "guru_bk" && db.siswa.length > 0) {
+        const initialBatch = db.siswa.slice(0, 10).map(s => s.id);
+        db.siswaAsuhan = initialBatch;
+        try { saveDatabase(false); } catch(e) {}
+        return db.siswa.filter(s => initialBatch.includes(s.id));
+      }
+    }
+  }
+
+  // Jika db.siswaAsuhan memiliki ID kadaluarsa yang tidak ada lagi di db.siswa, bersihkan
+  if (db.siswaAsuhan.length > 0 && list.length < db.siswaAsuhan.length) {
+    db.siswaAsuhan = list.map(s => s.id);
+    try { saveDatabase(false); } catch(e) {}
+  }
+
+  return list;
 }
 
 function renderDashboardGuruWali(container) {
@@ -12674,6 +14295,13 @@ function filterDaftarAsuhanTable() {
 
 function renderTambahSiswaAsuhanGuruWali(container) {
   db.siswaAsuhan = db.siswaAsuhan || [];
+  if (!db.siswa || db.siswa.length === 0) {
+    const masterStudents = getMasterStudents();
+    if (Array.isArray(masterStudents) && masterStudents.length > 0) {
+      db.siswa = [...masterStudents];
+      try { saveDatabase(false); } catch(e) {}
+    }
+  }
   const totalSiswa = (db.siswa || []).length;
   const sudahAsuhan = db.siswaAsuhan.length;
   const tersedia = Math.max(0, totalSiswa - sudahAsuhan);
@@ -12935,6 +14563,13 @@ function tambahkanSiswaTercentang() {
 // ==========================================
 function openPilihSiswaAsuhanModal() {
   db.siswaAsuhan = db.siswaAsuhan || [];
+  if (!db.siswa || db.siswa.length === 0) {
+    const masterStudents = getMasterStudents();
+    if (Array.isArray(masterStudents) && masterStudents.length > 0) {
+      db.siswa = [...masterStudents];
+      try { saveDatabase(false); } catch(e) {}
+    }
+  }
   const allSiswa = db.siswa || [];
 
   if (allSiswa.length === 0) {
@@ -13596,3 +15231,2915 @@ function sendDirectWA(phone, text) {
   }
   window.open(`https://wa.me/${phone}?text=${encodeURIComponent(text)}`, "_blank");
 }
+
+// ============================================================================
+// MODE GURU BK (BIMBINGAN DAN KONSELING) IMPLEMENTATION
+// ============================================================================
+
+let currentBKFilterKelas = "ALL";
+let currentBKFilterBidang = "ALL";
+let currentBKFilterLayanan = "ALL";
+let currentBKFilterStatus = "ALL";
+let currentBKMonth = new Date().getMonth();
+let currentBKYear = new Date().getFullYear();
+
+// Helper: ambil seluruh siswa atau filter per kelas untuk BK
+function getBKStudentsList(filterKelas = "ALL") {
+  if (!db || !db.siswa) return [];
+  if (filterKelas && filterKelas !== "ALL") {
+    return db.siswa.filter(s => s.kelasId === filterKelas);
+  }
+  return db.siswa;
+}
+
+// ----------------------------------------------------------------------------
+// 0. KELAS YANG DIBIMBING (BINAAN GURU BK)
+// ----------------------------------------------------------------------------
+function calculateStudentBKRisk(siswaId) {
+  const studentAbsensi = (db.absensi || []).filter(a => a.siswaId === siswaId);
+  const alpaCount = studentAbsensi.filter(a => a.status === "Alpa").length;
+  const bolosCount = studentAbsensi.filter(a => a.status === "Bolos").length;
+  const telatCount = studentAbsensi.filter(a => a.status === "Terlambat").length;
+  const hasCatatanWali = (db.catatanWali || []).some(cw => cw.siswaId === siswaId);
+  const hasNilaiRendah = (db.nilai || []).some(n => n.siswaId === siswaId && typeof n.nilai === 'number' && n.nilai < 75);
+  const activeBK = (db.layananBK || []).some(l => l.siswaId === siswaId && l.status === "Dalam Proses");
+
+  let level = "rendah"; // "tinggi", "sedang", "rendah"
+  let reasons = [];
+
+  if (alpaCount >= 3) reasons.push(`${alpaCount}x Alpa`);
+  if (bolosCount >= 2) reasons.push(`${bolosCount}x Bolos`);
+  if (hasCatatanWali) reasons.push("Catatan Wali");
+  if (activeBK) reasons.push("Konseling Aktif");
+
+  if (alpaCount >= 3 || bolosCount >= 2 || (hasCatatanWali && (alpaCount > 0 || bolosCount > 0))) {
+    level = "tinggi";
+  } else if (alpaCount > 0 || bolosCount > 0 || telatCount >= 3 || hasNilaiRendah || hasCatatanWali || activeBK) {
+    level = "sedang";
+    if (telatCount >= 3 && !reasons.includes(`${telatCount}x Terlambat`)) reasons.push(`${telatCount}x Telat`);
+    if (hasNilaiRendah && !reasons.includes("Nilai < KKM")) reasons.push("Nilai < KKM");
+  }
+
+  return { level, reasons, alpaCount, bolosCount, telatCount };
+}
+
+function renderKelasBimbinganBK(container) {
+  if (!container) container = document.getElementById("content-container") || document.getElementById("content-area");
+  if (!container) return;
+
+  db.kelas = db.kelas || [];
+  db.siswa = db.siswa || [];
+  db.kelasBimbinganBK = db.kelasBimbinganBK || [];
+  db.layananBK = db.layananBK || [];
+
+  // Default to all classes if empty
+  if (db.kelasBimbinganBK.length === 0 && db.kelas.length > 0) {
+    db.kelasBimbinganBK = db.kelas.map(k => k.id);
+  }
+
+  const allKelas = db.kelas;
+  const bimbinganKelasList = allKelas.filter(k => db.kelasBimbinganBK.includes(k.id));
+  const bimbinganStudents = db.siswa.filter(s => db.kelasBimbinganBK.includes(s.kelasId));
+
+  const totalKelas = bimbinganKelasList.length;
+  const totalSiswa = bimbinganStudents.length;
+  const totalL = bimbinganStudents.filter(s => s.jenisKelamin === 'L').length;
+  const totalP = bimbinganStudents.filter(s => s.jenisKelamin === 'P').length;
+  const kasusAktif = db.layananBK.filter(l => bimbinganStudents.some(s => s.id === l.siswaId) && l.status === "Dalam Proses").length;
+
+  let countRawanTinggi = 0;
+  let countRawanSedang = 0;
+  bimbinganStudents.forEach(s => {
+    const risk = calculateStudentBKRisk(s.id);
+    if (risk.level === "tinggi") countRawanTinggi++;
+    else if (risk.level === "sedang") countRawanSedang++;
+  });
+
+  const teacherName = (db.guruProfile && db.guruProfile.nama) ? db.guruProfile.nama : "Guru BK";
+  const userSchool = getCurrentSchoolName();
+
+  container.innerHTML = `
+    <!-- Welcoming & Management Header Banner -->
+    <div class="card" style="margin-bottom: 20px; background: linear-gradient(135deg, rgba(249, 115, 22, 0.08), rgba(234, 88, 12, 0.03)); border-color: rgba(249, 115, 22, 0.25);">
+      <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px;">
+        <div style="display: flex; align-items: center; gap: 14px;">
+          <div style="width: 52px; height: 52px; border-radius: 14px; background: linear-gradient(135deg, #f97316, #ea580c); display: flex; align-items: center; justify-content: center; color: #fff; font-size: 1.5rem; box-shadow: 0 4px 12px rgba(234, 88, 12, 0.3);">
+            <i class="fas fa-chalkboard-user"></i>
+          </div>
+          <div>
+            <h2 style="margin: 0; font-size: 1.25rem; font-weight: 700; color: var(--text-main);">
+              Kelas yang Dibimbing (Binaan BK)
+            </h2>
+            <p style="margin: 4px 0 0; font-size: 0.85rem; color: var(--text-muted);">
+              Kelola rombongan belajar binaan ${teacherName} • ${userSchool}
+            </p>
+          </div>
+        </div>
+
+        <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+          <button type="button" class="btn btn-primary" onclick="openAturKelasBimbinganModal()" style="background: linear-gradient(135deg, #f97316, #ea580c); border-color: #ea580c; box-shadow: 0 2px 8px rgba(234, 88, 12, 0.35);">
+            <i class="fas fa-sliders"></i> Atur Kelas Bimbingan
+          </button>
+          <button type="button" class="btn btn-secondary" onclick="exportKelasBimbinganToCSV()">
+            <i class="fas fa-file-csv"></i> Ekspor CSV Siswa
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 4 Stats Cards -->
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 14px; margin-bottom: 24px;">
+      <div class="bk-stat-card">
+        <div class="bk-stat-icon" style="background: rgba(249, 115, 22, 0.15); color: #ea580c;">
+          <i class="fas fa-school"></i>
+        </div>
+        <div>
+          <div style="font-size: 0.76rem; font-weight: 700; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.5px;">Kelas Dibimbing</div>
+          <div style="font-size: 1.45rem; font-weight: 800; color: var(--text-main); margin-top: 2px;">
+            ${totalKelas} <span style="font-size: 0.8rem; font-weight: 500; color: var(--text-muted);">/ ${allKelas.length} Rombel</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="bk-stat-card">
+        <div class="bk-stat-icon" style="background: rgba(59, 130, 246, 0.15); color: #2563eb;">
+          <i class="fas fa-user-graduate"></i>
+        </div>
+        <div>
+          <div style="font-size: 0.76rem; font-weight: 700; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.5px;">Total Siswa Binaan</div>
+          <div style="font-size: 1.45rem; font-weight: 800; color: var(--text-main); margin-top: 2px;">
+            ${totalSiswa} <span style="font-size: 0.8rem; font-weight: 500; color: var(--text-muted);">(${totalL} L / ${totalP} P)</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="bk-stat-card" style="cursor: pointer;" onclick="navigate('konseling_bk')" title="Lihat Sesi Konseling Aktif">
+        <div class="bk-stat-icon" style="background: rgba(245, 158, 11, 0.15); color: #d97706;">
+          <i class="fas fa-comments"></i>
+        </div>
+        <div>
+          <div style="font-size: 0.76rem; font-weight: 700; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.5px;">Kasus Konseling Aktif</div>
+          <div style="font-size: 1.45rem; font-weight: 800; color: #d97706; margin-top: 2px;">
+            ${kasusAktif} <span style="font-size: 0.8rem; font-weight: 500; color: var(--text-muted);">Dalam Proses</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="bk-stat-card" style="cursor: pointer;" onclick="navigate('peta_kerawanan')" title="Buka Peta Kerawanan Siswa">
+        <div class="bk-stat-icon" style="background: rgba(239, 68, 68, 0.15); color: #dc2626;">
+          <i class="fas fa-triangle-exclamation"></i>
+        </div>
+        <div>
+          <div style="font-size: 0.76rem; font-weight: 700; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.5px;">Siswa Perlu Perhatian</div>
+          <div style="font-size: 1.45rem; font-weight: 800; color: #dc2626; margin-top: 2px;">
+            ${countRawanTinggi} <span style="font-size: 0.8rem; font-weight: 500; color: #ea580c;">+${countRawanSedang} Sedang</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Grid Kartu Kelas Binaan -->
+    <div class="card" style="margin-bottom: 24px;">
+      <div class="card-header" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+        <h3 class="card-title" style="display: flex; align-items: center; gap: 8px;">
+          <i class="fas fa-grip" style="color: #ea580c;"></i> Rombongan Belajar Binaan
+        </h3>
+        <span style="font-size: 0.82rem; color: var(--text-muted);">
+          Menampilkan <b>${bimbinganKelasList.length}</b> kelas bimbingan aktif
+        </span>
+      </div>
+
+      ${bimbinganKelasList.length === 0 ? `
+        <div style="text-align: center; padding: 40px 20px; color: var(--text-muted);">
+          <i class="fas fa-chalkboard-user" style="font-size: 3rem; color: var(--text-muted); opacity: 0.4; margin-bottom: 12px; display: block;"></i>
+          <h4 style="margin: 0 0 8px; color: var(--text-main);">Belum Ada Kelas yang Dipilih</h4>
+          <p style="font-size: 0.88rem; max-width: 480px; margin: 0 auto 16px;">
+            Anda belum menentukan rombongan belajar mana saja yang menjadi kelas bimbingan Anda.
+          </p>
+          <button class="btn btn-primary btn-sm" onclick="openAturKelasBimbinganModal()">
+            <i class="fas fa-plus"></i> Tentukan Kelas Bimbingan Sekarang
+          </button>
+        </div>
+      ` : `
+        <div class="binaan-card-grid" style="margin-top: 8px;">
+          ${bimbinganKelasList.map(k => {
+            const kStudents = db.siswa.filter(s => s.kelasId === k.id);
+            const kL = kStudents.filter(s => s.jenisKelamin === 'L').length;
+            const kP = kStudents.filter(s => s.jenisKelamin === 'P').length;
+            const kBk = db.layananBK.filter(l => kStudents.some(s => s.id === l.siswaId));
+            const kBkProses = kBk.filter(l => l.status === "Dalam Proses").length;
+            const kBkTuntas = kBk.filter(l => l.status === "Tuntas").length;
+
+            let kRawanTinggi = 0;
+            let kRawanSedang = 0;
+            kStudents.forEach(s => {
+              const r = calculateStudentBKRisk(s.id);
+              if (r.level === "tinggi") kRawanTinggi++;
+              else if (r.level === "sedang") kRawanSedang++;
+            });
+
+            let statusBadge = `<span class="badge badge-rawan-rendah"><i class="fas fa-check-circle"></i> Kondusif</span>`;
+            if (kRawanTinggi > 0) {
+              statusBadge = `<span class="badge badge-rawan-tinggi"><i class="fas fa-triangle-exclamation"></i> ${kRawanTinggi} Perhatian Khusus</span>`;
+            } else if (kRawanSedang > 0 || kBkProses > 0) {
+              statusBadge = `<span class="badge badge-rawan-sedang"><i class="fas fa-circle-exclamation"></i> ${kRawanSedang} Pemantauan</span>`;
+            }
+
+            return `
+              <div class="binaan-card">
+                <div>
+                  <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px;">
+                    <div>
+                      <h4 style="margin: 0; font-size: 1.15rem; font-weight: 700; color: var(--text-main); display: flex; align-items: center; gap: 8px;">
+                        <i class="fas fa-school" style="color: #ea580c; font-size: 1rem;"></i> Kelas ${k.nama}
+                      </h4>
+                      <div style="font-size: 0.78rem; color: var(--text-muted); margin-top: 3px;">
+                        <i class="fas fa-user-tie"></i> Wali Kelas: <b>${k.waliKelas || '-'}</b>
+                      </div>
+                    </div>
+                    <div>${statusBadge}</div>
+                  </div>
+
+                  <div style="background: var(--bg-app); border-radius: 8px; padding: 10px 12px; margin-bottom: 14px; font-size: 0.82rem; border: 1px solid var(--border-color);">
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 6px;">
+                      <span style="color: var(--text-muted);">Jumlah Siswa:</span>
+                      <span style="font-weight: 700; color: var(--text-main);">${kStudents.length} Siswa (${kL} L / ${kP} P)</span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 6px;">
+                      <span style="color: var(--text-muted);">Layanan BK Tercatat:</span>
+                      <span style="font-weight: 600; color: #ea580c;">${kBk.length} Sesi (${kBkProses} Proses, ${kBkTuntas} Tuntas)</span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between;">
+                      <span style="color: var(--text-muted);">Status Kerawanan:</span>
+                      <span style="font-weight: 600; color: ${kRawanTinggi > 0 ? '#dc2626' : (kRawanSedang > 0 ? '#d97706' : '#059669')};">
+                        ${kRawanTinggi > 0 ? `${kRawanTinggi} Siswa Rawan` : (kRawanSedang > 0 ? `${kRawanSedang} Siswa Terpantau` : 'Aman')}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <div style="display: flex; gap: 6px; flex-wrap: wrap; margin-top: auto;">
+                  <button type="button" class="btn btn-secondary btn-sm" onclick="showDetailKelasBimbinganModal('${k.id}')" style="flex: 1; min-width: 100px;">
+                    <i class="fas fa-users"></i> Siswa (${kStudents.length})
+                  </button>
+                  <button type="button" class="btn btn-secondary btn-sm" onclick="openKonselingBKModal(null, null, 'Belajar', '', '${k.id}')" style="color: #ea580c; border-color: rgba(249, 115, 22, 0.4);" title="Catat Layanan Konseling untuk Siswa Kelas ${k.nama}">
+                    <i class="fas fa-plus"></i> Konseling
+                  </button>
+                </div>
+              </div>
+            `;
+          }).join("")}
+        </div>
+      `}
+    </div>
+
+    <!-- Section Data Siswa Kelas Bimbingan -->
+    <div class="card">
+      <div class="card-header" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;">
+        <h3 class="card-title" style="display: flex; align-items: center; gap: 8px;">
+          <i class="fas fa-user-graduate" style="color: #2563eb;"></i> Data Siswa di Seluruh Kelas Bimbingan
+        </h3>
+        <span class="badge badge-hadir" id="binaan-siswa-count-badge">${bimbinganStudents.length} Siswa</span>
+      </div>
+
+      <!-- Filter Controls -->
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-bottom: 16px; background: var(--bg-app); padding: 12px; border-radius: 10px; border: 1px solid var(--border-color);">
+        <div>
+          <label style="font-size: 0.78rem; font-weight: 600; color: var(--text-muted); display: block; margin-bottom: 4px;">Filter Kelas:</label>
+          <select id="filter-kb-kelas" class="form-control" onchange="filterKelasBimbinganTable()">
+            <option value="ALL">Semua Kelas Bimbingan (${bimbinganKelasList.length} Kelas)</option>
+            ${bimbinganKelasList.map(k => `<option value="${k.id}">Kelas ${k.nama}</option>`).join("")}
+          </select>
+        </div>
+        <div>
+          <label style="font-size: 0.78rem; font-weight: 600; color: var(--text-muted); display: block; margin-bottom: 4px;">Filter Kerawanan:</label>
+          <select id="filter-kb-risk" class="form-control" onchange="filterKelasBimbinganTable()">
+            <option value="ALL">Semua Status Kerawanan</option>
+            <option value="tinggi">Rawan Tinggi (Perhatian Khusus)</option>
+            <option value="sedang">Rawan Sedang (Pemantauan)</option>
+            <option value="rendah">Aman / Kondusif</option>
+          </select>
+        </div>
+        <div>
+          <label style="font-size: 0.78rem; font-weight: 600; color: var(--text-muted); display: block; margin-bottom: 4px;">Cari Siswa:</label>
+          <input type="text" id="search-kb-siswa" class="form-control" placeholder="Ketik nama atau NISN..." oninput="filterKelasBimbinganTable()">
+        </div>
+      </div>
+
+      <!-- Table -->
+      <div class="table-responsive">
+        <table>
+          <thead>
+            <tr>
+              <th style="width: 40px; text-align: center;">No</th>
+              <th>Nama Siswa & NISN</th>
+              <th>Kelas</th>
+              <th style="text-align: center;">L/P</th>
+              <th>Status Kerawanan</th>
+              <th>Layanan BK Terakhir</th>
+              <th>Kontak Orang Tua</th>
+              <th class="actions-cell">Aksi Cepat</th>
+            </tr>
+          </thead>
+          <tbody id="binaan-siswa-table-body">
+            <!-- Loaded dynamically via filterKelasBimbinganTable -->
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+
+  filterKelasBimbinganTable();
+}
+
+function filterKelasBimbinganTable() {
+  const tbody = document.getElementById("binaan-siswa-table-body");
+  if (!tbody) return;
+
+  const kelasFilter = (document.getElementById("filter-kb-kelas") || {}).value || "ALL";
+  const riskFilter = (document.getElementById("filter-kb-risk") || {}).value || "ALL";
+  const searchQuery = ((document.getElementById("search-kb-siswa") || {}).value || "").trim().toLowerCase();
+
+  db.kelasBimbinganBK = db.kelasBimbinganBK || [];
+  let students = (db.siswa || []).filter(s => db.kelasBimbinganBK.includes(s.kelasId));
+
+  if (kelasFilter !== "ALL") {
+    students = students.filter(s => s.kelasId === kelasFilter);
+  }
+
+  if (searchQuery) {
+    students = students.filter(s => 
+      (s.nama || "").toLowerCase().includes(searchQuery) || 
+      (s.nisn || "").toLowerCase().includes(searchQuery)
+    );
+  }
+
+  const mapped = students.map(s => {
+    const k = (db.kelas || []).find(c => c.id === s.kelasId) || { nama: "-" };
+    const risk = calculateStudentBKRisk(s.id);
+    const bkList = (db.layananBK || []).filter(l => l.siswaId === s.id);
+    const latestBk = bkList.sort((a, b) => new Date(b.tanggal || b.createdAt) - new Date(a.tanggal || a.createdAt))[0] || null;
+    const contact = getStudentParentContact(s.id);
+    return { s, k, risk, latestBk, contact };
+  });
+
+  let filtered = mapped;
+  if (riskFilter !== "ALL") {
+    filtered = filtered.filter(item => item.risk.level === riskFilter);
+  }
+
+  // Update badge count
+  const countBadge = document.getElementById("binaan-siswa-count-badge");
+  if (countBadge) countBadge.textContent = `${filtered.length} Siswa`;
+
+  if (filtered.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="8" style="text-align: center; padding: 24px; color: var(--text-muted);">Tidak ditemukan data siswa binaan yang cocok dengan kriteria filter.</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = filtered.map((item, idx) => {
+    const { s, k, risk, latestBk, contact } = item;
+
+    let riskBadge = `<span class="badge badge-rawan-rendah"><i class="fas fa-check"></i> Aman</span>`;
+    if (risk.level === "tinggi") {
+      riskBadge = `<span class="badge badge-rawan-tinggi" title="${risk.reasons.join(', ')}"><i class="fas fa-triangle-exclamation"></i> Tinggi (${risk.reasons.slice(0, 2).join(', ')})</span>`;
+    } else if (risk.level === "sedang") {
+      riskBadge = `<span class="badge badge-rawan-sedang" title="${risk.reasons.join(', ')}"><i class="fas fa-circle-exclamation"></i> Sedang (${risk.reasons.slice(0, 2).join(', ')})</span>`;
+    }
+
+    let bkBadge = `<span style="color: var(--text-muted); font-size: 0.8rem;">- Belum ada -</span>`;
+    if (latestBk) {
+      const isDone = latestBk.status === "Tuntas";
+      bkBadge = `
+        <div style="font-size: 0.8rem; line-height: 1.3;">
+          <span class="badge ${isDone ? 'badge-bk-selesai' : 'badge-bk-proses'}">${latestBk.jenisLayanan || 'Konseling'}</span>
+          <div style="color: var(--text-muted); font-size: 0.72rem; margin-top: 2px;">${formatDateIndo(latestBk.tanggal)} • ${latestBk.bidang}</div>
+        </div>
+      `;
+    }
+
+    let ortuHtml = `<span style="color: var(--text-muted); font-size: 0.78rem;">Belum ada kontak</span>`;
+    if (contact && contact.hasPhone) {
+      ortuHtml = `
+        <div style="font-size: 0.8rem;">
+          <b>${contact.waliNama || 'Orang Tua'}</b> (${contact.hubungan || 'Wali'})<br>
+          <a href="javascript:void(0)" onclick="sendWhatsAppMessageToParent('${s.id}')" style="color: #10b981; font-size: 0.75rem; text-decoration: none; display: inline-flex; align-items: center; gap: 4px;">
+            <i class="fab fa-whatsapp"></i> ${contact.nomorHp}
+          </a>
+        </div>
+      `;
+    } else if (contact && contact.waliNama) {
+      ortuHtml = `<span style="font-size: 0.8rem;"><b>${contact.waliNama}</b> (${contact.hubungan || 'Wali'})</span>`;
+    }
+
+    return `
+      <tr>
+        <td style="text-align: center;">${idx + 1}</td>
+        <td>
+          <strong>${s.nama}</strong>
+          <div style="font-size: 0.74rem; color: var(--text-muted); font-family: monospace;">NISN: ${s.nisn || '-'}</div>
+        </td>
+        <td><b>Kelas ${k.nama}</b></td>
+        <td style="text-align: center;">${s.jenisKelamin === 'L' ? '<span class="badge" style="background: rgba(59, 130, 246, 0.1); color: #2563eb;">L</span>' : '<span class="badge" style="background: rgba(236, 72, 153, 0.1); color: #db2777;">P</span>'}</td>
+        <td>${riskBadge}</td>
+        <td>${bkBadge}</td>
+        <td>${ortuHtml}</td>
+        <td class="actions-cell">
+          <button type="button" class="btn btn-secondary btn-sm" onclick="openKonselingBKModal(null, '${s.id}', 'Pribadi')" title="Buka Sesi Konseling Siswa" style="color: #ea580c; border-color: rgba(249, 115, 22, 0.35);">
+            <i class="fas fa-comments"></i> Konseling
+          </button>
+          ${contact && contact.hasPhone ? `
+            <button type="button" class="btn btn-secondary btn-sm" onclick="sendWhatsAppMessageToParent('${s.id}')" title="Kirim Pesan WhatsApp ke Orang Tua" style="color: #10b981; border-color: rgba(16, 185, 129, 0.35);">
+              <i class="fab fa-whatsapp"></i>
+            </button>
+          ` : ''}
+          <button type="button" class="btn btn-secondary btn-sm" onclick="openPeminatanKarirModal(null, '${s.id}')" title="Peminatan & Karir Siswa">
+            <i class="fas fa-compass"></i>
+          </button>
+        </td>
+      </tr>
+    `;
+  }).join("");
+}
+
+function openAturKelasBimbinganModal() {
+  db.kelas = db.kelas || [];
+  db.kelasBimbinganBK = db.kelasBimbinganBK || [];
+
+  if (db.kelas.length === 0) {
+    alert("Belum ada data kelas yang terdaftar di sekolah. Silakan buat data kelas terlebih dahulu di menu Data Kelas.");
+    return;
+  }
+
+  const bodyHtml = `
+    <div style="font-size: 0.88rem;">
+      <p style="color: var(--text-muted); margin-bottom: 14px; line-height: 1.5;">
+        Centang kelas-kelas rombongan belajar yang menjadi tanggung jawab bimbingan dan konseling Anda sebagai Guru BK.
+      </p>
+
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; background: var(--bg-app); padding: 8px 12px; border-radius: 8px; border: 1px solid var(--border-color);">
+        <span style="font-size: 0.82rem; font-weight: 600; color: var(--text-main);">
+          Total: <b style="color: #ea580c;">${db.kelas.length} Kelas</b> di Sekolah
+        </span>
+        <div style="display: flex; gap: 8px;">
+          <button type="button" class="btn btn-secondary btn-sm" onclick="toggleCheckAllKelasBimbingan(true)">Pilih Semua</button>
+          <button type="button" class="btn btn-secondary btn-sm" onclick="toggleCheckAllKelasBimbingan(false)">Kosongkan</button>
+        </div>
+      </div>
+
+      <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; max-height: 360px; overflow-y: auto; padding: 4px;">
+        ${db.kelas.map(k => {
+          const isChecked = db.kelasBimbinganBK.includes(k.id);
+          const studentCount = (db.siswa || []).filter(s => s.kelasId === k.id).length;
+          return `
+            <label style="display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 8px; border: 1px solid ${isChecked ? '#ea580c' : 'var(--border-color)'}; background: ${isChecked ? 'rgba(249, 115, 22, 0.05)' : 'var(--bg-card)'}; cursor: pointer; transition: all 0.2s ease;">
+              <input type="checkbox" name="kelas_bimbingan_check" value="${k.id}" ${isChecked ? 'checked' : ''} onchange="this.parentElement.style.borderColor = this.checked ? '#ea580c' : 'var(--border-color)'; this.parentElement.style.background = this.checked ? 'rgba(249, 115, 22, 0.05)' : 'var(--bg-card)';">
+              <div>
+                <strong style="color: var(--text-main); font-size: 0.92rem;">Kelas ${k.nama}</strong>
+                <div style="font-size: 0.74rem; color: var(--text-muted);">${studentCount} Siswa • Wali: ${k.waliKelas || '-'}</div>
+              </div>
+            </label>
+          `;
+        }).join("")}
+      </div>
+    </div>
+  `;
+
+  const footerHtml = `
+    <button type="button" class="btn btn-secondary" onclick="closeModal()">Batal</button>
+    <button type="button" class="btn btn-primary" onclick="handleSaveKelasBimbinganBK()" style="background: linear-gradient(135deg, #f97316, #ea580c); border-color: #ea580c;">
+      <i class="fas fa-save"></i> Simpan Pilihan Kelas
+    </button>
+  `;
+
+  openModal("Atur Rombel / Kelas Bimbingan BK", bodyHtml, footerHtml);
+}
+
+function toggleCheckAllKelasBimbingan(checked) {
+  const checkboxes = document.querySelectorAll("input[name='kelas_bimbingan_check']");
+  checkboxes.forEach(cb => {
+    cb.checked = checked;
+    if (cb.parentElement) {
+      cb.parentElement.style.borderColor = checked ? '#ea580c' : 'var(--border-color)';
+      cb.parentElement.style.background = checked ? 'rgba(249, 115, 22, 0.05)' : 'var(--bg-card)';
+    }
+  });
+}
+
+async function handleSaveKelasBimbinganBK() {
+  const checkboxes = document.querySelectorAll("input[name='kelas_bimbingan_check']:checked");
+  const selectedIds = Array.from(checkboxes).map(cb => cb.value);
+
+  if (selectedIds.length === 0) {
+    if (!confirm("Anda tidak memilih satu pun kelas bimbingan. Apakah Anda yakin ingin mengosongkan daftar kelas bimbingan?")) {
+      return;
+    }
+  }
+
+  db.kelasBimbinganBK = selectedIds;
+  await saveDatabase(true);
+  closeModal();
+  showToast("Pengaturan kelas bimbingan berhasil disimpan!");
+  renderKelasBimbinganBK(document.getElementById("content-container"));
+}
+
+function showDetailKelasBimbinganModal(kelasId) {
+  const k = (db.kelas || []).find(c => c.id === kelasId);
+  if (!k) return;
+
+  const students = (db.siswa || []).filter(s => s.kelasId === kelasId);
+  const totalL = students.filter(s => s.jenisKelamin === 'L').length;
+  const totalP = students.filter(s => s.jenisKelamin === 'P').length;
+  const classBK = (db.layananBK || []).filter(l => students.some(s => s.id === l.siswaId));
+
+  const bodyHtml = `
+    <div style="font-size: 0.88rem;">
+      <!-- Header Info -->
+      <div style="background: var(--bg-app); border-radius: 10px; padding: 14px; margin-bottom: 18px; border: 1px solid var(--border-color); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;">
+        <div>
+          <h3 style="margin: 0 0 4px; font-size: 1.15rem; color: var(--text-main);">
+            <i class="fas fa-school" style="color: #ea580c;"></i> Rombel: Kelas ${k.nama}
+          </h3>
+          <div style="color: var(--text-muted); font-size: 0.82rem;">
+            Wali Kelas: <b>${k.waliKelas || 'Belum diatur'}</b>
+          </div>
+        </div>
+        <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+          <span class="badge badge-hadir">${students.length} Total Siswa</span>
+          <span class="badge badge-izin">${totalL} Laki-laki</span>
+          <span class="badge badge-sakit">${totalP} Perempuan</span>
+          <span class="badge" style="background: rgba(249, 115, 22, 0.15); color: #ea580c; border: 1px solid rgba(249, 115, 22, 0.3);">${classBK.length} Layanan BK</span>
+        </div>
+      </div>
+
+      <!-- Students Table -->
+      <div class="table-responsive" style="max-height: 420px; overflow-y: auto;">
+        <table>
+          <thead>
+            <tr>
+              <th style="width: 35px; text-align: center;">No</th>
+              <th>Nama Siswa & NISN</th>
+              <th style="text-align: center;">L/P</th>
+              <th>Kerawanan</th>
+              <th>Layanan BK</th>
+              <th>Kontak Ortu</th>
+              <th class="actions-cell">Aksi</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${students.length === 0 ? `
+              <tr><td colspan="7" style="text-align: center; color: var(--text-muted); padding: 20px;">Belum ada siswa di kelas ini.</td></tr>
+            ` : students.map((s, idx) => {
+              const risk = calculateStudentBKRisk(s.id);
+              const contact = getStudentParentContact(s.id);
+              const studentBK = classBK.filter(l => l.siswaId === s.id);
+
+              let riskBadge = `<span class="badge badge-rawan-rendah">Aman</span>`;
+              if (risk.level === "tinggi") riskBadge = `<span class="badge badge-rawan-tinggi">Tinggi</span>`;
+              else if (risk.level === "sedang") riskBadge = `<span class="badge badge-rawan-sedang">Sedang</span>`;
+
+              return `
+                <tr>
+                  <td style="text-align: center;">${idx + 1}</td>
+                  <td>
+                    <strong>${s.nama}</strong>
+                    <div style="font-size: 0.72rem; color: var(--text-muted); font-family: monospace;">${s.nisn || '-'}</div>
+                  </td>
+                  <td style="text-align: center;"><b>${s.jenisKelamin || '-'}</b></td>
+                  <td>${riskBadge}</td>
+                  <td>
+                    <span style="font-size: 0.8rem; font-weight: 600; color: #ea580c;">${studentBK.length} Sesi</span>
+                  </td>
+                  <td>
+                    ${contact && contact.hasPhone ? `
+                      <a href="javascript:void(0)" onclick="sendWhatsAppMessageToParent('${s.id}')" style="color: #10b981; font-size: 0.78rem; text-decoration: none;">
+                        <i class="fab fa-whatsapp"></i> ${contact.waliNama || 'Wali'}
+                      </a>
+                    ` : `<span style="color: var(--text-muted); font-size: 0.78rem;">-</span>`}
+                  </td>
+                  <td class="actions-cell">
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="closeModal(); openKonselingBKModal(null, '${s.id}', 'Pribadi')" style="color: #ea580c; border-color: rgba(249, 115, 22, 0.35);">
+                      <i class="fas fa-plus"></i> Konseling
+                    </button>
+                  </td>
+                </tr>
+              `;
+            }).join("")}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+
+  const footerHtml = `
+    <button type="button" class="btn btn-secondary" onclick="closeModal()">Tutup</button>
+  `;
+
+  openModal(`Detail Rombel: Kelas ${k.nama}`, bodyHtml, footerHtml, true);
+}
+
+function exportKelasBimbinganToCSV() {
+  db.kelasBimbinganBK = db.kelasBimbinganBK || [];
+  const bimbinganStudents = (db.siswa || []).filter(s => db.kelasBimbinganBK.includes(s.kelasId));
+
+  if (bimbinganStudents.length === 0) {
+    alert("Belum ada data siswa di kelas bimbingan untuk diekspor.");
+    return;
+  }
+
+  const clean = str => `"${(str || '').replace(/"/g, '""').replace(/\r?\n/g, ' ')}"`;
+  let csv = "No;NISN;Nama Siswa;Kelas;Jenis Kelamin;Wali Kelas;Status Kerawanan;Total Sesi BK;Nama Wali;Nomor HP Ortu\r\n";
+
+  bimbinganStudents.forEach((s, idx) => {
+    const k = (db.kelas || []).find(c => c.id === s.kelasId) || { nama: "-", waliKelas: "-" };
+    const risk = calculateStudentBKRisk(s.id);
+    const bkCount = (db.layananBK || []).filter(l => l.siswaId === s.id).length;
+    const contact = getStudentParentContact(s.id);
+
+    csv += `${idx + 1};${clean(s.nisn)};${clean(s.nama)};${clean(k.nama)};${clean(s.jenisKelamin)};${clean(k.waliKelas)};${clean(risk.level)};${bkCount};${clean(contact ? contact.waliNama : '')};${clean(contact ? contact.nomorHp : '')}\r\n`;
+  });
+
+  downloadCSV(csv, `rekap_siswa_kelas_bimbingan_bk_${getLocalDateString()}.csv`);
+}
+
+// ----------------------------------------------------------------------------
+// 1. DASHBOARD GURU BK
+// ----------------------------------------------------------------------------
+function renderDashboardGuruBK(container) {
+  if (!container) container = document.getElementById("content-container") || document.getElementById("content-area");
+  if (!container) return;
+
+  db.layananBK = db.layananBK || [];
+  db.agendaBK = db.agendaBK || [];
+  db.peminatanKarirBK = db.peminatanKarirBK || [];
+
+  const totalSesi = db.layananBK.length;
+  const sesiProses = db.layananBK.filter(x => x.status === "Dalam Proses").length;
+  const sesiTuntas = db.layananBK.filter(x => x.status === "Tuntas").length;
+  const agendaMendatang = db.agendaBK.filter(x => x.status === "Terjadwal").length;
+
+  // Hitung siswa prioritas/rawan dari seluruh kelas
+  const allStudents = db.siswa || [];
+  let countRawanTinggi = 0;
+  let countRawanSedang = 0;
+
+  allStudents.forEach(s => {
+    const studentAbsensi = (db.absensi || []).filter(a => a.siswaId === s.id);
+    const alpaCount = studentAbsensi.filter(a => a.status === "Alpa").length;
+    const bolosCount = studentAbsensi.filter(a => a.status === "Bolos").length;
+    const telatCount = studentAbsensi.filter(a => a.status === "Terlambat").length;
+    const hasCatatanWali = (db.catatanWali || []).some(cw => cw.siswaId === s.id);
+    const hasNilaiRendah = (db.nilai || []).some(n => n.siswaId === s.id && typeof n.nilai === 'number' && n.nilai < 75);
+
+    if (alpaCount >= 3 || bolosCount >= 2 || (hasCatatanWali && (alpaCount > 0 || bolosCount > 0))) {
+      countRawanTinggi++;
+    } else if (alpaCount > 0 || bolosCount > 0 || telatCount >= 3 || hasNilaiRendah || hasCatatanWali) {
+      countRawanSedang++;
+    }
+  });
+
+  const recentSessions = [...db.layananBK].sort((a, b) => new Date(b.tanggal || b.createdAt) - new Date(a.tanggal || a.createdAt)).slice(0, 5);
+  const upcomingAgendas = [...db.agendaBK].filter(x => x.status === "Terjadwal").sort((a, b) => new Date(a.tanggal) - new Date(b.tanggal)).slice(0, 4);
+
+  const teacherName = (db.guruProfile && db.guruProfile.nama) ? db.guruProfile.nama : "Guru BK";
+  const userSchool = getCurrentSchoolName();
+
+  container.innerHTML = `
+    <!-- Top Welcoming & Quick Action Bar -->
+    <div class="card" style="margin-bottom: 20px; background: linear-gradient(135deg, rgba(249, 115, 22, 0.08), rgba(234, 88, 12, 0.03)); border-color: rgba(249, 115, 22, 0.25);">
+      <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px;">
+        <div style="display: flex; align-items: center; gap: 14px;">
+          <div style="width: 52px; height: 52px; border-radius: 14px; background: linear-gradient(135deg, #f97316, #ea580c); display: flex; align-items: center; justify-content: center; color: #fff; font-size: 1.5rem; box-shadow: 0 4px 12px rgba(234, 88, 12, 0.3);">
+            <i class="fas fa-user-shield"></i>
+          </div>
+          <div>
+            <h2 style="margin: 0; font-size: 1.25rem; font-weight: 700; color: var(--text-main);">
+              Selamat Datang, ${teacherName}
+            </h2>
+            <p style="margin: 4px 0 0; font-size: 0.85rem; color: var(--text-muted);">
+              Pusat Layanan Bimbingan & Konseling • ${userSchool}
+            </p>
+          </div>
+        </div>
+
+        <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+          <button type="button" class="btn btn-primary" onclick="openKonselingBKModal()" style="background: linear-gradient(135deg, #f97316, #ea580c); border-color: #ea580c; box-shadow: 0 2px 8px rgba(234, 88, 12, 0.35);">
+            <i class="fas fa-plus-circle"></i> Catat Layanan Konseling
+          </button>
+          <button type="button" class="btn btn-secondary" onclick="navigate('kelas_bimbingan')">
+            <i class="fas fa-chalkboard-user"></i> Kelas Bimbingan
+          </button>
+          <button type="button" class="btn btn-secondary" onclick="openAgendaBKModal()">
+            <i class="fas fa-calendar-plus"></i> Jadwal Temu / Home Visit
+          </button>
+          <button type="button" class="btn btn-secondary" onclick="navigate('rekap_bk')">
+            <i class="fas fa-print"></i> Laporan BK
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 4 Stats Counter Cards -->
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 14px; margin-bottom: 22px;">
+      <div class="bk-stat-card">
+        <div class="bk-stat-icon" style="background: rgba(249, 115, 22, 0.15); color: #ea580c;">
+          <i class="fas fa-comments"></i>
+        </div>
+        <div>
+          <div style="font-size: 0.76rem; font-weight: 700; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.5px;">Total Layanan BK</div>
+          <div style="font-size: 1.45rem; font-weight: 800; color: var(--text-main); margin-top: 2px;">${totalSesi} <span style="font-size: 0.8rem; font-weight: 500; color: var(--text-muted);">Sesi</span></div>
+        </div>
+      </div>
+
+      <div class="bk-stat-card" style="cursor: pointer;" onclick="navigate('peta_kerawanan')" title="Buka Peta Kerawanan Siswa">
+        <div class="bk-stat-icon" style="background: rgba(239, 68, 68, 0.15); color: #dc2626;">
+          <i class="fas fa-triangle-exclamation"></i>
+        </div>
+        <div>
+          <div style="font-size: 0.76rem; font-weight: 700; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.5px;">Siswa Butuh Perhatian</div>
+          <div style="font-size: 1.45rem; font-weight: 800; color: #dc2626; margin-top: 2px;">${countRawanTinggi} <span style="font-size: 0.8rem; font-weight: 500; color: #ea580c;">+${countRawanSedang} Sedang</span></div>
+        </div>
+      </div>
+
+      <div class="bk-stat-card" style="cursor: pointer;" onclick="navigate('konseling_bk')">
+        <div class="bk-stat-icon" style="background: rgba(245, 158, 11, 0.15); color: #d97706;">
+          <i class="fas fa-spinner"></i>
+        </div>
+        <div>
+          <div style="font-size: 0.76rem; font-weight: 700; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.5px;">Sedang Dalam Proses</div>
+          <div style="font-size: 1.45rem; font-weight: 800; color: #d97706; margin-top: 2px;">${sesiProses} <span style="font-size: 0.8rem; font-weight: 500; color: #10b981;">(${sesiTuntas} Tuntas)</span></div>
+        </div>
+      </div>
+
+      <div class="bk-stat-card" style="cursor: pointer;" onclick="navigate('agenda_bk')">
+        <div class="bk-stat-icon" style="background: rgba(59, 130, 246, 0.15); color: #2563eb;">
+          <i class="fas fa-calendar-check"></i>
+        </div>
+        <div>
+          <div style="font-size: 0.76rem; font-weight: 700; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.5px;">Agenda Janji Temu</div>
+          <div style="font-size: 1.45rem; font-weight: 800; color: #2563eb; margin-top: 2px;">${agendaMendatang} <span style="font-size: 0.8rem; font-weight: 500; color: var(--text-muted);">Jadwal</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Quick Navigation Shortcuts Bar -->
+    <div class="card" style="margin-bottom: 22px; padding: 12px 16px;">
+      <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px;">
+        <div style="display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 0.86rem; color: var(--text-main);">
+          <i class="fas fa-compass" style="color: #ea580c;"></i> Menu Cepat Guru BK:
+        </div>
+        <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+          <button type="button" class="btn btn-secondary btn-sm" onclick="navigate('konseling_bk')">
+            <i class="fas fa-comments"></i> Layanan Konseling (${totalSesi})
+          </button>
+          <button type="button" class="btn btn-secondary btn-sm" onclick="navigate('peta_kerawanan')">
+            <i class="fas fa-triangle-exclamation" style="color: #dc2626;"></i> Peta Kerawanan
+          </button>
+          <button type="button" class="btn btn-secondary btn-sm" onclick="navigate('karir_bk')">
+            <i class="fas fa-compass" style="color: #059669;"></i> Peminatan & Karir
+          </button>
+          <button type="button" class="btn btn-secondary btn-sm" onclick="navigate('agenda_bk')">
+            <i class="fas fa-calendar-alt" style="color: #2563eb;"></i> Agenda & Home Visit
+          </button>
+          <button type="button" class="btn btn-secondary btn-sm" onclick="navigate('kontak')">
+            <i class="fas fa-address-book"></i> Kontak Orang Tua
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Section 1: Radar Presensi Siswa Sekolah (Terintegrasi) -->
+    <div id="dashboard-tindak-lanjut-section" style="margin-bottom: 22px;"></div>
+
+    <!-- Section 2: Radar Kendala Belajar Siswa (Bimbingan Akademik BK) -->
+    <div id="dashboard-akademik-section" style="margin-bottom: 22px;"></div>
+
+    <!-- Section 3 & 4: Dua Kolom (Sesi Konseling Terbaru & Agenda Mendatang) -->
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px; margin-bottom: 22px;">
+      <!-- Sesi Konseling Terkini -->
+      <div class="card">
+        <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
+          <h3 style="margin: 0; font-size: 1.05rem;">
+            <i class="fas fa-clock-rotate-left" style="color: #ea580c;"></i> Sesi Konseling Terbaru
+          </h3>
+          <a href="#konseling_bk" onclick="navigate('konseling_bk')" style="font-size: 0.8rem; font-weight: 600; color: #ea580c; text-decoration: none;">
+            Lihat Semua <i class="fas fa-arrow-right"></i>
+          </a>
+        </div>
+
+        <div style="margin-top: 12px;">
+          ${recentSessions.length === 0 ? `
+            <div style="text-align: center; padding: 28px 14px; color: var(--text-muted);">
+              <i class="fas fa-comments" style="font-size: 2rem; opacity: 0.3; margin-bottom: 6px; display: block;"></i>
+              Belum ada riwayat sesi konseling. Klik tombol <strong>+ Catat Layanan Konseling</strong> di atas.
+            </div>
+          ` : `
+            <div style="display: flex; flex-direction: column; gap: 10px;">
+              ${recentSessions.map(item => {
+                const s = (db.siswa || []).find(x => x.id === item.siswaId) || { nama: "Siswa", kelasId: "-" };
+                const k = (db.kelas || []).find(x => x.id === s.kelasId) || { nama: "-" };
+                const contact = getStudentParentContact(s.id);
+                const badgeBidangClass = item.bidang === 'Pribadi' ? 'badge-bk-pribadi' : item.bidang === 'Sosial' ? 'badge-bk-sosial' : item.bidang === 'Belajar' ? 'badge-bk-belajar' : 'badge-bk-karir';
+                const statusBadgeClass = item.status === 'Tuntas' ? 'badge-bk-selesai' : item.status === 'Alih Tangan' ? 'badge-bk-rujukan' : 'badge-bk-proses';
+                return `
+                  <div style="border: 1px solid var(--border-color); border-radius: 10px; padding: 12px; background: var(--bg-card); display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap;">
+                    <div style="flex: 1; min-width: 180px;">
+                      <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px;">
+                        <span style="font-weight: 700; font-size: 0.9rem; color: var(--text-main);">${s.nama}</span>
+                        <span class="badge" style="background: var(--bg-app); border: 1px solid var(--border-color); font-size: 0.72rem;">${k.nama}</span>
+                        <span class="badge ${badgeBidangClass}" style="font-size: 0.7rem;">${item.bidang || 'Konseling'}</span>
+                      </div>
+                      <div style="font-size: 0.78rem; color: var(--text-muted); line-height: 1.4;">
+                        <span style="font-weight: 600;">${item.jenisLayanan || 'Konseling Individu'}</span> • ${formatDateIndo(item.tanggal)} ${item.waktu ? '• ' + item.waktu : ''}
+                      </div>
+                      <div style="font-size: 0.8rem; color: var(--text-main); margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 320px;">
+                        ${item.gejala || '-'}
+                      </div>
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 6px;">
+                      <span class="badge ${statusBadgeClass}">${item.status || 'Proses'}</span>
+                      <button type="button" class="btn btn-secondary btn-sm" onclick="openDetailKonselingBKModal('${item.id}')" title="Detail & Cetak">
+                        <i class="fas fa-eye"></i>
+                      </button>
+                      ${contact.hasPhone ? `
+                        <button type="button" class="btn btn-sm" style="background: #25D366; color: #fff; padding: 4px 8px; border-radius: 6px;" onclick="sendBKStudentWA('${s.id}', 'konsultasi', { pokok: item.gejala })" title="Chat WA Orang Tua">
+                          <i class="fab fa-whatsapp"></i>
+                        </button>
+                      ` : ''}
+                    </div>
+                  </div>
+                `;
+              }).join("")}
+            </div>
+          `}
+        </div>
+      </div>
+
+      <!-- Agenda Janji Temu Terdekat -->
+      <div class="card">
+        <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
+          <h3 style="margin: 0; font-size: 1.05rem;">
+            <i class="fas fa-calendar-check" style="color: #2563eb;"></i> Agenda & Janji Temu BK
+          </h3>
+          <a href="#agenda_bk" onclick="navigate('agenda_bk')" style="font-size: 0.8rem; font-weight: 600; color: #2563eb; text-decoration: none;">
+            Lihat Semua <i class="fas fa-arrow-right"></i>
+          </a>
+        </div>
+
+        <div style="margin-top: 12px;">
+          ${upcomingAgendas.length === 0 ? `
+            <div style="text-align: center; padding: 28px 14px; color: var(--text-muted);">
+              <i class="fas fa-calendar-day" style="font-size: 2rem; opacity: 0.3; margin-bottom: 6px; display: block;"></i>
+              Tidak ada agenda janji temu terdekat. Klik <strong>+ Jadwal Temu / Home Visit</strong> untuk menjadwalkan.
+            </div>
+          ` : `
+            <div style="display: flex; flex-direction: column; gap: 10px;">
+              ${upcomingAgendas.map(ag => {
+                const s = (db.siswa || []).find(x => x.id === ag.siswaId) || { nama: "Siswa", kelasId: "-" };
+                const k = (db.kelas || []).find(x => x.id === s.kelasId) || { nama: "-" };
+                return `
+                  <div style="border: 1px solid var(--border-color); border-radius: 10px; padding: 12px; background: var(--bg-card); display: flex; justify-content: space-between; align-items: center; gap: 10px;">
+                    <div>
+                      <div style="font-weight: 700; font-size: 0.88rem; color: var(--text-main);">
+                        ${ag.kegiatan || 'Konseling'}
+                      </div>
+                      <div style="font-size: 0.78rem; color: var(--text-muted); margin-top: 2px;">
+                        <i class="fas fa-user-graduate"></i> ${s.nama} (${k.nama}) • <i class="fas fa-location-dot"></i> ${ag.tempat || 'Ruang BK'}
+                      </div>
+                      <div style="font-size: 0.78rem; color: #2563eb; font-weight: 600; margin-top: 4px;">
+                        <i class="fas fa-clock"></i> ${formatDateIndo(ag.tanggal)} ${ag.waktu ? 'pk ' + ag.waktu : ''}
+                      </div>
+                    </div>
+                    <div style="display: flex; gap: 6px;">
+                      <button type="button" class="btn btn-secondary btn-sm" onclick="sendAgendaReminderWA('${ag.id}')" title="Kirim Pengingat WhatsApp" style="color: #25D366;">
+                        <i class="fab fa-whatsapp"></i>
+                      </button>
+                      <button type="button" class="btn btn-primary btn-sm" onclick="toggleStatusAgendaBK('${ag.id}')" title="Tandai Selesai" style="background:#10b981; border-color:#10b981;">
+                        <i class="fas fa-check"></i>
+                      </button>
+                    </div>
+                  </div>
+                `;
+              }).join("")}
+            </div>
+          `}
+        </div>
+      </div>
+    </div>
+  `;
+
+  // Render sub-radars
+  renderDashboardIntervention();
+  renderDashboardAcademicAlerts();
+}
+
+// ----------------------------------------------------------------------------
+// 2. LAYANAN BIMBINGAN & KONSELING (JURNAL & ADMINISTRASI SESI)
+// ----------------------------------------------------------------------------
+function renderKonselingBK(container) {
+  if (!container) container = document.getElementById("content-container") || document.getElementById("content-area");
+  if (!container) return;
+
+  db.layananBK = db.layananBK || [];
+  const list = [...db.layananBK].sort((a, b) => new Date(b.tanggal || b.createdAt) - new Date(a.tanggal || a.createdAt));
+
+  const kelasOptions = [
+    '<option value="ALL">Semua Kelas</option>',
+    ...(db.kelas || []).map(k => `<option value="${k.id}" ${k.id === currentBKFilterKelas ? 'selected' : ''}>${k.tingkat ? k.tingkat + ' - ' : ''}${k.nama}</option>`)
+  ].join("");
+
+  const bidangList = ["ALL", "Pribadi", "Sosial", "Belajar", "Karir"];
+  const bidangOptions = bidangList.map(b => `<option value="${b}" ${b === currentBKFilterBidang ? 'selected' : ''}>${b === 'ALL' ? 'Semua Bidang' : b}</option>`).join("");
+
+  const layananList = [
+    "ALL",
+    "Konseling Individu",
+    "Konseling Kelompok",
+    "Bimbingan Klasikal",
+    "Bimbingan Kelompok",
+    "Konsultasi Orang Tua",
+    "Kunjungan Rumah (Home Visit)",
+    "Konferensi Kasus",
+    "Alih Tangan Kasus"
+  ];
+  const layananOptions = layananList.map(l => `<option value="${l}" ${l === currentBKFilterLayanan ? 'selected' : ''}>${l === 'ALL' ? 'Semua Jenis Layanan' : l}</option>`).join("");
+
+  const statusList = ["ALL", "Dalam Proses", "Tuntas", "Alih Tangan"];
+  const statusOptions = statusList.map(st => `<option value="${st}" ${st === currentBKFilterStatus ? 'selected' : ''}>${st === 'ALL' ? 'Semua Status' : st}</option>`).join("");
+
+  container.innerHTML = `
+    <!-- Action and Filter Bar -->
+    <div class="card" style="margin-bottom: 20px;">
+      <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 14px; margin-bottom: 14px;">
+        <div>
+          <h3 style="margin: 0; font-size: 1.15rem; color: var(--text-main);">
+            <i class="fas fa-comments" style="color: #ea580c;"></i> Buku Jurnal Layanan Bimbingan & Konseling
+          </h3>
+          <p style="margin: 4px 0 0; font-size: 0.8rem; color: var(--text-muted);">
+            Pencatatan sesi bimbingan konseling individu, kelompok, klasikal, dan penanganan siswa SMA Negeri Saku.
+          </p>
+        </div>
+        <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+          <button type="button" class="btn btn-primary" onclick="openKonselingBKModal()" style="background: linear-gradient(135deg, #f97316, #ea580c); border-color: #ea580c; box-shadow: 0 2px 8px rgba(234, 88, 12, 0.35);">
+            <i class="fas fa-plus"></i> Tambah Sesi Konseling
+          </button>
+          <button type="button" class="btn btn-secondary" onclick="printJurnalKonselingBK()">
+            <i class="fas fa-print"></i> Cetak Jurnal
+          </button>
+          <button type="button" class="btn btn-secondary" onclick="exportKonselingBKCSV()">
+            <i class="fas fa-file-csv"></i> Export CSV
+          </button>
+        </div>
+      </div>
+
+      <!-- Filters Row -->
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; padding-top: 12px; border-top: 1px solid var(--border-color);">
+        <div>
+          <label style="font-size: 0.74rem; font-weight: 700; color: var(--text-muted); display: block; margin-bottom: 3px;">CARI SISWA / KASUS:</label>
+          <input type="text" id="filter-bk-search" class="form-control" placeholder="Ketik nama atau kata kunci..." oninput="filterKonselingBKTable()">
+        </div>
+        <div>
+          <label style="font-size: 0.74rem; font-weight: 700; color: var(--text-muted); display: block; margin-bottom: 3px;">KELAS:</label>
+          <select id="filter-bk-kelas" class="form-control" onchange="currentBKFilterKelas = this.value; filterKonselingBKTable();">
+            ${kelasOptions}
+          </select>
+        </div>
+        <div>
+          <label style="font-size: 0.74rem; font-weight: 700; color: var(--text-muted); display: block; margin-bottom: 3px;">BIDANG BIMBINGAN:</label>
+          <select id="filter-bk-bidang" class="form-control" onchange="currentBKFilterBidang = this.value; filterKonselingBKTable();">
+            ${bidangOptions}
+          </select>
+        </div>
+        <div>
+          <label style="font-size: 0.74rem; font-weight: 700; color: var(--text-muted); display: block; margin-bottom: 3px;">JENIS LAYANAN:</label>
+          <select id="filter-bk-layanan" class="form-control" onchange="currentBKFilterLayanan = this.value; filterKonselingBKTable();">
+            ${layananOptions}
+          </select>
+        </div>
+        <div>
+          <label style="font-size: 0.74rem; font-weight: 700; color: var(--text-muted); display: block; margin-bottom: 3px;">STATUS:</label>
+          <select id="filter-bk-status" class="form-control" onchange="currentBKFilterStatus = this.value; filterKonselingBKTable();">
+            ${statusOptions}
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <!-- Data Table Card -->
+    <div class="card">
+      <div class="card-header" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+        <span style="font-size: 0.88rem; font-weight: 700; color: var(--text-main);">
+          Daftar Catatan Konseling (<span id="count-bk-records">${list.length}</span> Data)
+        </span>
+        <span style="font-size: 0.78rem; color: var(--text-muted);">
+          Asas Kerahasiaan Konseling dijaga sesuai Kode Etik BK
+        </span>
+      </div>
+
+      <div class="table-responsive" style="margin-top: 10px;">
+        <table class="table" id="table-layanan-bk" style="width: 100%;">
+          <thead>
+            <tr>
+              <th style="width: 35px; text-align: center;">No</th>
+              <th style="width: 110px;">Tanggal</th>
+              <th>Nama Siswa</th>
+              <th>Kelas</th>
+              <th>Bidang</th>
+              <th>Jenis Layanan</th>
+              <th>Gejala / Masalah</th>
+              <th>Rencana Tindak Lanjut</th>
+              <th style="text-align: center; width: 95px;">Status</th>
+              <th style="text-align: center; width: 140px;">Aksi</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${list.length === 0 ? `
+              <tr>
+                <td colspan="10" style="text-align: center; padding: 40px 16px; color: var(--text-muted);">
+                  <i class="fas fa-clipboard-list" style="font-size: 2.2rem; margin-bottom: 10px; display: block; opacity: 0.4;"></i>
+                  Belum ada catatan layanan konseling. Klik tombol <strong>+ Tambah Sesi Konseling</strong> untuk mencatat.
+                </td>
+              </tr>
+            ` : list.map((item, idx) => {
+              const student = (db.siswa || []).find(s => s.id === item.siswaId) || { nama: "Siswa", nisn: "-", kelasId: "" };
+              const kelas = (db.kelas || []).find(k => k.id === (item.kelasId || student.kelasId)) || { nama: "-" };
+              const contact = getStudentParentContact(student.id);
+
+              const badgeBidangClass = item.bidang === 'Pribadi' ? 'badge-bk-pribadi' : item.bidang === 'Sosial' ? 'badge-bk-sosial' : item.bidang === 'Belajar' ? 'badge-bk-belajar' : 'badge-bk-karir';
+              const statusBadgeClass = item.status === 'Tuntas' ? 'badge-bk-selesai' : item.status === 'Alih Tangan' ? 'badge-bk-rujukan' : 'badge-bk-proses';
+              const urgencyBadgeClass = item.urgensi === 'Mendesak' ? 'badge-urgensi-tinggi' : item.urgensi === 'Sedang' ? 'badge-urgensi-sedang' : 'badge-urgensi-rendah';
+
+              return `
+                <tr data-id="${item.id}" data-kelas="${kelas.id || student.kelasId || ''}" data-bidang="${item.bidang || ''}" data-layanan="${item.jenisLayanan || ''}" data-status="${item.status || ''}" data-search="${(student.nama + ' ' + (student.nisn || '') + ' ' + (item.gejala || '') + ' ' + (item.uraian || '')).toLowerCase()}">
+                  <td style="text-align: center;">${idx + 1}</td>
+                  <td>
+                    <div style="font-weight: 600; font-size: 0.85rem;">${formatDateIndo(item.tanggal)}</div>
+                    ${item.waktu ? `<div style="font-size: 0.74rem; color: var(--text-muted);">pk ${item.waktu}</div>` : ''}
+                  </td>
+                  <td style="font-weight: 700; color: var(--text-main);">
+                    ${student.nama}
+                    ${student.nisn ? `<div style="font-size: 0.72rem; color: var(--text-muted); font-weight: normal;">NISN: ${student.nisn}</div>` : ''}
+                  </td>
+                  <td><span class="badge" style="background:var(--bg-app); border:1px solid var(--border-color);">${kelas.nama}</span></td>
+                  <td><span class="badge ${badgeBidangClass}">${item.bidang || 'Pribadi'}</span></td>
+                  <td>
+                    <div style="font-weight: 600; font-size: 0.82rem;">${item.jenisLayanan || 'Konseling Individu'}</div>
+                    ${item.urgensi ? `<span class="badge ${urgencyBadgeClass}" style="font-size: 0.68rem; margin-top: 2px;">${item.urgensi}</span>` : ''}
+                  </td>
+                  <td style="max-width: 220px;">
+                    <div style="font-size: 0.82rem; line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;" title="${escapeHtml(item.gejala || '')}">
+                      ${item.gejala || '-'}
+                    </div>
+                  </td>
+                  <td style="max-width: 200px;">
+                    <div style="font-size: 0.82rem; line-height: 1.4; color: var(--text-muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;" title="${escapeHtml(item.tindakLanjut || '')}">
+                      ${item.tindakLanjut || '-'}
+                    </div>
+                  </td>
+                  <td style="text-align: center;">
+                    <span class="badge ${statusBadgeClass}">${item.status || 'Dalam Proses'}</span>
+                  </td>
+                  <td style="text-align: center;">
+                    <div style="display: inline-flex; gap: 4px; align-items: center;">
+                      <button type="button" class="btn btn-secondary btn-sm" onclick="openDetailKonselingBKModal('${item.id}')" title="Lihat Lembar Konseling Lengkap & Cetak" style="padding: 4px 7px;">
+                        <i class="fas fa-file-lines"></i>
+                      </button>
+                      <button type="button" class="btn btn-secondary btn-sm" onclick="openKonselingBKModal('${item.id}')" title="Edit Sesi Konseling" style="padding: 4px 7px;">
+                        <i class="fas fa-edit"></i>
+                      </button>
+                      ${contact.hasPhone ? `
+                        <button type="button" class="btn btn-sm" style="background: #25D366; color: #fff; padding: 4px 7px; border-radius: 6px;" onclick="sendBKStudentWA('${student.id}', 'konsultasi', { pokok: item.gejala })" title="Chat WhatsApp Wali">
+                          <i class="fab fa-whatsapp"></i>
+                        </button>
+                      ` : ''}
+                      <button type="button" class="btn btn-danger btn-sm" onclick="deleteKonselingBK('${item.id}')" title="Hapus Data" style="padding: 4px 7px;">
+                        <i class="fas fa-trash"></i>
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              `;
+            }).join("")}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function filterKonselingBKTable() {
+  const q = (document.getElementById("filter-bk-search")?.value || "").toLowerCase().trim();
+  const k = document.getElementById("filter-bk-kelas")?.value || "ALL";
+  const b = document.getElementById("filter-bk-bidang")?.value || "ALL";
+  const l = document.getElementById("filter-bk-layanan")?.value || "ALL";
+  const st = document.getElementById("filter-bk-status")?.value || "ALL";
+
+  const rows = document.querySelectorAll("#table-layanan-bk tbody tr");
+  let visibleCount = 0;
+
+  rows.forEach(r => {
+    if (!r.hasAttribute("data-id")) return;
+    const rKelas = r.getAttribute("data-kelas") || "";
+    const rBidang = r.getAttribute("data-bidang") || "";
+    const rLayanan = r.getAttribute("data-layanan") || "";
+    const rStatus = r.getAttribute("data-status") || "";
+    const rSearch = r.getAttribute("data-search") || "";
+
+    const matchQ = !q || rSearch.includes(q);
+    const matchK = k === "ALL" || rKelas === k;
+    const matchB = b === "ALL" || rBidang === b;
+    const matchL = l === "ALL" || rLayanan === l;
+    const matchSt = st === "ALL" || rStatus === st;
+
+    if (matchQ && matchK && matchB && matchL && matchSt) {
+      r.style.display = "";
+      visibleCount++;
+    } else {
+      r.style.display = "none";
+    }
+  });
+
+  const countEl = document.getElementById("count-bk-records");
+  if (countEl) countEl.textContent = visibleCount;
+}
+
+// ----------------------------------------------------------------------------
+// MODAL INPUT / EDIT SESI KONSELING BK
+// ----------------------------------------------------------------------------
+function openKonselingBKModal(counselingId = null, defaultSiswaId = null, defaultBidang = null, defaultGejala = null) {
+  const existing = counselingId ? (db.layananBK || []).find(x => x.id === counselingId) : null;
+  const allStudents = db.siswa || [];
+
+  if (allStudents.length === 0) {
+    alert("Belum ada data siswa di database. Silakan isi data siswa terlebih dahulu.");
+    return;
+  }
+
+  const activeSiswaId = existing ? existing.siswaId : (defaultSiswaId || allStudents[0].id);
+  const tanggal = existing ? existing.tanggal : getLocalDateString();
+  const now = new Date();
+  const waktu = existing ? (existing.waktu || "") : `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+  const bidang = existing ? existing.bidang : (defaultBidang || "Pribadi");
+  const jenisLayanan = existing ? existing.jenisLayanan : "Konseling Individu";
+  const urgensi = existing ? existing.urgensi : "Biasa";
+  const sumber = existing ? existing.sumber : "Inisiatif Siswa (Sukarela)";
+  const gejala = existing ? existing.gejala : (defaultGejala || "");
+  const uraian = existing ? (existing.uraian || "") : "";
+  const tindakLanjut = existing ? (existing.tindakLanjut || "") : "";
+  const status = existing ? existing.status : "Dalam Proses";
+  const catatan = existing ? (existing.catatan || "") : "";
+
+  const studentOptions = allStudents.map(s => {
+    const k = (db.kelas || []).find(cl => cl.id === s.kelasId) || { nama: "-" };
+    return `<option value="${s.id}" ${s.id === activeSiswaId ? 'selected' : ''}>${s.nama} (${k.nama}) - NISN: ${s.nisn || '-'}</option>`;
+  }).join("");
+
+  const bidangList = ["Pribadi", "Sosial", "Belajar", "Karir"];
+  const layananList = [
+    "Konseling Individu",
+    "Konseling Kelompok",
+    "Bimbingan Klasikal",
+    "Bimbingan Kelompok",
+    "Konsultasi Orang Tua / Wali",
+    "Kunjungan Rumah (Home Visit)",
+    "Konferensi Kasus",
+    "Alih Tangan Kasus (Referral)"
+  ];
+  const urgensiList = ["Biasa", "Sedang", "Mendesak"];
+  const sumberList = [
+    "Inisiatif Siswa (Sukarela)",
+    "Rujukan Wali Kelas",
+    "Rujukan Guru Mapel",
+    "Panggilan Guru BK",
+    "Laporan Orang Tua / Teman"
+  ];
+
+  const bodyHtml = `
+    <form id="form-konseling-bk" onsubmit="handleSaveKonselingBK(event, '${counselingId || ''}')">
+      <div style="background: rgba(249, 115, 22, 0.08); border: 1px solid rgba(249, 115, 22, 0.25); border-radius: 8px; padding: 10px 14px; margin-bottom: 14px; font-size: 0.8rem; color: #ea580c; display: flex; align-items: center; gap: 8px;">
+        <i class="fas fa-shield-halved" style="font-size: 1.1rem;"></i>
+        <span><strong>Asas Kerahasiaan Konseling:</strong> Informasi konseling siswa bersifat rahasia dan hanya digunakan untuk kepentingan pendampingan perkembangan siswa.</span>
+      </div>
+
+      <div class="form-group" style="margin-bottom: 12px;">
+        <label style="font-weight: 700; font-size: 0.85rem; display: block; margin-bottom: 4px;">Pilih Siswa yang Diberi Layanan: *</label>
+        <select id="modal-bk-siswa" class="form-control" required style="font-weight: 600;">
+          ${studentOptions}
+        </select>
+      </div>
+
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px;">
+        <div>
+          <label style="font-weight: 700; font-size: 0.85rem; display: block; margin-bottom: 4px;">Tanggal Konseling: *</label>
+          <input type="date" id="modal-bk-tanggal" class="form-control" value="${tanggal}" required>
+        </div>
+        <div>
+          <label style="font-weight: 700; font-size: 0.85rem; display: block; margin-bottom: 4px;">Waktu / Jam:</label>
+          <input type="time" id="modal-bk-waktu" class="form-control" value="${waktu}">
+        </div>
+      </div>
+
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px;">
+        <div>
+          <label style="font-weight: 700; font-size: 0.85rem; display: block; margin-bottom: 4px;">Bidang Bimbingan: *</label>
+          <select id="modal-bk-bidang" class="form-control" required>
+            ${bidangList.map(b => `<option value="${b}" ${b === bidang ? 'selected' : ''}>${b}</option>`).join("")}
+          </select>
+        </div>
+        <div>
+          <label style="font-weight: 700; font-size: 0.85rem; display: block; margin-bottom: 4px;">Jenis Layanan BK: *</label>
+          <select id="modal-bk-layanan" class="form-control" required>
+            ${layananList.map(l => `<option value="${l}" ${l === jenisLayanan ? 'selected' : ''}>${l}</option>`).join("")}
+          </select>
+        </div>
+      </div>
+
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px;">
+        <div>
+          <label style="font-weight: 700; font-size: 0.85rem; display: block; margin-bottom: 4px;">Tingkat Urgensi Masalah:</label>
+          <select id="modal-bk-urgensi" class="form-control">
+            ${urgensiList.map(u => `<option value="${u}" ${u === urgensi ? 'selected' : ''}>${u}</option>`).join("")}
+          </select>
+        </div>
+        <div>
+          <label style="font-weight: 700; font-size: 0.85rem; display: block; margin-bottom: 4px;">Sumber Rujukan / Inisiatif:</label>
+          <select id="modal-bk-sumber" class="form-control">
+            ${sumberList.map(sr => `<option value="${sr}" ${sr === sumber ? 'selected' : ''}>${sr}</option>`).join("")}
+          </select>
+        </div>
+      </div>
+
+      <div class="form-group" style="margin-bottom: 12px;">
+        <label style="font-weight: 700; font-size: 0.85rem; display: block; margin-bottom: 4px;">Gejala / Pokok Masalah Siswa: *</label>
+        <textarea id="modal-bk-gejala" class="form-control" rows="2" placeholder="Jelaskan topik yang dikonsultasikan atau kendala yang dihadapi siswa..." required>${gejala}</textarea>
+      </div>
+
+      <div class="form-group" style="margin-bottom: 12px;">
+        <label style="font-weight: 700; font-size: 0.85rem; display: block; margin-bottom: 4px;">Dinamika Konseling / Uraian Pendekatan BK:</label>
+        <textarea id="modal-bk-uraian" class="form-control" rows="3" placeholder="Uraikan dinamika masalah, eksplorasi penyebab, atau teknik konseling yang digunakan...">${uraian}</textarea>
+      </div>
+
+      <div class="form-group" style="margin-bottom: 12px;">
+        <label style="font-weight: 700; font-size: 0.85rem; display: block; margin-bottom: 4px;">Rencana Tindak Lanjut (RTL) & Kesepakatan: *</label>
+        <textarea id="modal-bk-rtl" class="form-control" rows="2" placeholder="Komitmen siswa, tindakan perbaikan, atau jadwal pertemuan evaluasi selanjutnya..." required>${tindakLanjut}</textarea>
+      </div>
+
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px;">
+        <div>
+          <label style="font-weight: 700; font-size: 0.85rem; display: block; margin-bottom: 4px;">Status Penanganan:</label>
+          <select id="modal-bk-status" class="form-control">
+            <option value="Dalam Proses" ${status === 'Dalam Proses' ? 'selected' : ''}>Dalam Proses</option>
+            <option value="Tuntas" ${status === 'Tuntas' ? 'selected' : ''}>Tuntas / Selesai</option>
+            <option value="Alih Tangan" ${status === 'Alih Tangan' ? 'selected' : ''}>Alih Tangan Kasus (Referral)</option>
+          </select>
+        </div>
+        <div>
+          <label style="font-weight: 700; font-size: 0.85rem; display: block; margin-bottom: 4px;">Catatan Tambahan / Kerahasiaan:</label>
+          <input type="text" id="modal-bk-catatan" class="form-control" placeholder="Catatan internal Guru BK (opsional)" value="${catatan}">
+        </div>
+      </div>
+    </form>
+  `;
+
+  const footerHtml = `
+    <button type="button" class="btn btn-secondary" onclick="closeModal()">Batal</button>
+    <button type="button" class="btn btn-primary" onclick="document.getElementById('form-konseling-bk').requestSubmit()" style="background: linear-gradient(135deg, #f97316, #ea580c); border-color: #ea580c;">
+      <i class="fas fa-save"></i> ${counselingId ? 'Simpan Perubahan' : 'Simpan Sesi Konseling'}
+    </button>
+  `;
+
+  openModal(counselingId ? "Edit Sesi Layanan Bimbingan & Konseling" : "Catat Sesi Layanan Bimbingan & Konseling Baru", bodyHtml, footerHtml, true);
+}
+
+function handleSaveKonselingBK(event, counselingId) {
+  if (event) event.preventDefault();
+
+  const siswaId = document.getElementById("modal-bk-siswa").value;
+  const tanggal = document.getElementById("modal-bk-tanggal").value;
+  const waktu = document.getElementById("modal-bk-waktu").value;
+  const bidang = document.getElementById("modal-bk-bidang").value;
+  const jenisLayanan = document.getElementById("modal-bk-layanan").value;
+  const urgensi = document.getElementById("modal-bk-urgensi").value;
+  const sumber = document.getElementById("modal-bk-sumber").value;
+  const gejala = document.getElementById("modal-bk-gejala").value.trim();
+  const uraian = document.getElementById("modal-bk-uraian").value.trim();
+  const tindakLanjut = document.getElementById("modal-bk-rtl").value.trim();
+  const status = document.getElementById("modal-bk-status").value;
+  const catatan = document.getElementById("modal-bk-catatan").value.trim();
+
+  if (!siswaId || !tanggal || !gejala || !tindakLanjut) {
+    alert("Mohon lengkapi seluruh field bertanda bintang (*)");
+    return;
+  }
+
+  const student = (db.siswa || []).find(s => s.id === siswaId);
+  const kelasId = student ? student.kelasId : "";
+
+  db.layananBK = db.layananBK || [];
+
+  if (counselingId) {
+    const idx = db.layananBK.findIndex(x => x.id === counselingId);
+    if (idx !== -1) {
+      db.layananBK[idx] = {
+        ...db.layananBK[idx],
+        siswaId,
+        kelasId,
+        tanggal,
+        waktu,
+        bidang,
+        jenisLayanan,
+        urgensi,
+        sumber,
+        gejala,
+        uraian,
+        tindakLanjut,
+        status,
+        catatan,
+        updatedAt: new Date().toISOString()
+      };
+    }
+  } else {
+    const newId = "bk-" + Date.now();
+    db.layananBK.push({
+      id: newId,
+      siswaId,
+      kelasId,
+      tanggal,
+      waktu,
+      bidang,
+      jenisLayanan,
+      urgensi,
+      sumber,
+      gejala,
+      uraian,
+      tindakLanjut,
+      status,
+      catatan,
+      createdAt: new Date().toISOString()
+    });
+  }
+
+  saveDatabase(true);
+  closeModal();
+  showToast(counselingId ? "Catatan konseling berhasil diperbarui!" : "Sesi konseling baru berhasil disimpan!");
+
+  const curHash = window.location.hash.substring(1) || "dashboard";
+  if (curHash === "konseling_bk") {
+    renderKonselingBK(document.getElementById("content-container") || document.getElementById("content-area"));
+  } else {
+    renderDashboardGuruBK(document.getElementById("content-container") || document.getElementById("content-area"));
+  }
+}
+
+function deleteKonselingBK(id) {
+  if (!confirm("Apakah Anda yakin ingin menghapus data sesi konseling ini?")) return;
+  db.layananBK = (db.layananBK || []).filter(x => x.id !== id);
+  saveDatabase(true);
+  showToast("Catatan konseling berhasil dihapus.");
+
+  const curHash = window.location.hash.substring(1) || "dashboard";
+  if (curHash === "konseling_bk") {
+    renderKonselingBK(document.getElementById("content-container") || document.getElementById("content-area"));
+  } else {
+    renderDashboardGuruBK(document.getElementById("content-container") || document.getElementById("content-area"));
+  }
+}
+
+// ----------------------------------------------------------------------------
+// DETAIL & LEMBAR RESMI KONSELING BK
+// ----------------------------------------------------------------------------
+function openDetailKonselingBKModal(id) {
+  const item = (db.layananBK || []).find(x => x.id === id);
+  if (!item) return;
+
+  const s = (db.siswa || []).find(x => x.id === item.siswaId) || { nama: "Siswa", nisn: "-", jenisKelamin: "-", alamat: "-" };
+  const k = (db.kelas || []).find(x => x.id === (item.kelasId || s.kelasId)) || { nama: "-" };
+  const contact = getStudentParentContact(s.id);
+  const teacherName = (db.guruProfile && db.guruProfile.nama) ? db.guruProfile.nama : "Guru BK";
+  const teacherNip = (db.guruProfile && db.guruProfile.nip) ? `NIP. ${db.guruProfile.nip}` : "-";
+  const userSchool = getCurrentSchoolName();
+
+  const bodyHtml = `
+    <div id="print-sheet-konseling" style="background:#fff; color:#111827; padding:20px; border-radius:8px;">
+      <div style="text-align:center; border-bottom:2px solid #333; padding-bottom:10px; margin-bottom:16px;">
+        <h3 style="margin:0; font-size:1.15rem; text-transform:uppercase; font-weight:800;">LEMBAR LAPORAN LAYANAN BIMBINGAN & KONSELING</h3>
+        <p style="margin:2px 0 0; font-size:0.85rem; color:#4b5563;">${userSchool}</p>
+      </div>
+
+      <table style="width:100%; border-collapse:collapse; margin-bottom:14px; font-size:0.85rem;">
+        <tr>
+          <td style="width:150px; font-weight:700; padding:4px 0;">Nama Siswa</td>
+          <td style="width:10px;">:</td>
+          <td><strong>${s.nama}</strong> (${s.jenisKelamin === 'P' ? 'Perempuan' : 'Laki-laki'})</td>
+        </tr>
+        <tr>
+          <td style="font-weight:700; padding:4px 0;">Kelas / NISN</td>
+          <td>:</td>
+          <td>${k.nama} / ${s.nisn || '-'}</td>
+        </tr>
+        <tr>
+          <td style="font-weight:700; padding:4px 0;">Orang Tua / Wali</td>
+          <td>:</td>
+          <td>${contact.namaWali} ${contact.noHp ? '(' + contact.noHp + ')' : ''}</td>
+        </tr>
+        <tr>
+          <td style="font-weight:700; padding:4px 0;">Hari / Tanggal / Jam</td>
+          <td>:</td>
+          <td>${formatDateIndoFull(item.tanggal)} ${item.waktu ? 'pk ' + item.waktu : ''}</td>
+        </tr>
+        <tr>
+          <td style="font-weight:700; padding:4px 0;">Bidang / Layanan</td>
+          <td>:</td>
+          <td><strong>${item.bidang || 'Pribadi'}</strong> • ${item.jenisLayanan || 'Konseling Individu'} (Urgensi: ${item.urgensi || 'Biasa'})</td>
+        </tr>
+        <tr>
+          <td style="font-weight:700; padding:4px 0;">Sumber Rujukan</td>
+          <td>:</td>
+          <td>${item.sumber || 'Inisiatif Siswa'}</td>
+        </tr>
+        <tr>
+          <td style="font-weight:700; padding:4px 0;">Status Penanganan</td>
+          <td>:</td>
+          <td><strong>${item.status || 'Dalam Proses'}</strong></td>
+        </tr>
+      </table>
+
+      <div style="margin-bottom:12px; font-size:0.85rem;">
+        <div style="font-weight:700; background:#f3f4f6; padding:6px 10px; border-radius:6px; margin-bottom:6px;">
+          1. GEJALA / POKOK MASALAH SISWA:
+        </div>
+        <div style="padding:4px 10px; line-height:1.5; white-space:pre-wrap;">${item.gejala || '-'}</div>
+      </div>
+
+      <div style="margin-bottom:12px; font-size:0.85rem;">
+        <div style="font-weight:700; background:#f3f4f6; padding:6px 10px; border-radius:6px; margin-bottom:6px;">
+          2. DINAMIKA & PENDEKATAN KONSELING:
+        </div>
+        <div style="padding:4px 10px; line-height:1.5; white-space:pre-wrap;">${item.uraian || 'Telah dilakukan wawancara konseling dan pendalaman masalah bersama siswa.'}</div>
+      </div>
+
+      <div style="margin-bottom:12px; font-size:0.85rem;">
+        <div style="font-weight:700; background:#f3f4f6; padding:6px 10px; border-radius:6px; margin-bottom:6px;">
+          3. RENCANA TINDAK LANJUT (RTL) & KESEPAKATAN:
+        </div>
+        <div style="padding:4px 10px; line-height:1.5; white-space:pre-wrap;">${item.tindakLanjut || '-'}</div>
+      </div>
+
+      ${item.catatan ? `
+        <div style="margin-bottom:14px; font-size:0.82rem; font-style:italic; color:#6b7280; padding:4px 10px;">
+          Catatan Kerahasiaan BK: ${item.catatan}
+        </div>
+      ` : ''}
+
+      <div style="margin-top:24px; display:flex; justify-content:space-between; text-align:center; font-size:0.85rem;">
+        <div style="width:200px;">
+          <div>Siswa Bersangkutan,</div>
+          <div style="height:55px;"></div>
+          <div style="font-weight:700; text-decoration:underline;">${s.nama}</div>
+          <div>NISN. ${s.nisn || '-'}</div>
+        </div>
+        <div style="width:240px;">
+          <div>Guru Bimbingan Konseling,</div>
+          <div style="height:55px;"></div>
+          <div style="font-weight:700; text-decoration:underline;">${teacherName}</div>
+          <div>${teacherNip}</div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  const footerHtml = `
+    <button type="button" class="btn btn-secondary" onclick="closeModal()">Tutup</button>
+    <button type="button" class="btn btn-secondary" onclick="openKonselingBKModal('${item.id}')">
+      <i class="fas fa-edit"></i> Edit
+    </button>
+    ${contact.hasPhone ? `
+      <button type="button" class="btn btn-success" style="background:#25D366; border-color:#25D366;" onclick="sendBKStudentWA('${s.id}', 'konsultasi', { pokok: item.gejala })">
+        <i class="fab fa-whatsapp"></i> Hubungi Orang Tua
+      </button>
+    ` : ''}
+    <button type="button" class="btn btn-primary" onclick="window.print()" style="background: linear-gradient(135deg, #f97316, #ea580c); border-color: #ea580c;">
+      <i class="fas fa-print"></i> Cetak Lembar Konseling
+    </button>
+  `;
+
+  openModal("Lembar Layanan Konseling Siswa", bodyHtml, footerHtml, true);
+}
+
+function exportKonselingBKCSV() {
+  const list = db.layananBK || [];
+  if (list.length === 0) {
+    alert("Belum ada data layanan konseling untuk diekspor.");
+    return;
+  }
+
+  let csv = "No;Tanggal;Waktu;Nama Siswa;NISN;Kelas;Bidang;Jenis Layanan;Urgensi;Sumber Rujukan;Masalah;Rencana Tindak Lanjut;Status;Catatan Kerahasiaan\r\n";
+
+  list.forEach((item, idx) => {
+    const s = (db.siswa || []).find(x => x.id === item.siswaId) || { nama: "Siswa", nisn: "", kelasId: "" };
+    const k = (db.kelas || []).find(x => x.id === (item.kelasId || s.kelasId)) || { nama: "-" };
+
+    const clean = str => `"${(str || '').replace(/"/g, '""').replace(/\r?\n/g, ' ')}"`;
+
+    csv += `${idx + 1};${item.tanggal};${item.waktu || ''};${clean(s.nama)};${clean(s.nisn)};${clean(k.nama)};${clean(item.bidang)};${clean(item.jenisLayanan)};${clean(item.urgensi)};${clean(item.sumber)};${clean(item.gejala)};${clean(item.tindakLanjut)};${clean(item.status)};${clean(item.catatan)}\r\n`;
+  });
+
+  downloadCSV(csv, `jurnal_layanan_bk_${getLocalDateString()}.csv`);
+}
+
+function printJurnalKonselingBK() {
+  window.print();
+}
+
+// ----------------------------------------------------------------------------
+// 3. PETA KERAWANAN SISWA (EARLY WARNING SYSTEM BK)
+// ----------------------------------------------------------------------------
+function renderPetaKerawananBK(container) {
+  if (!container) container = document.getElementById("content-container") || document.getElementById("content-area");
+  if (!container) return;
+
+  const allStudents = db.siswa || [];
+  const kelasList = db.kelas || [];
+
+  // Hitung profil kerawanan per siswa
+  const mappedData = allStudents.map(s => {
+    const k = kelasList.find(c => c.id === s.kelasId) || { nama: "-" };
+    const attList = (db.absensi || []).filter(a => a.siswaId === s.id);
+    const alpa = attList.filter(a => a.status === "Alpa").length;
+    const bolos = attList.filter(a => a.status === "Bolos").length;
+    const terlambat = attList.filter(a => a.status === "Terlambat").length;
+    const totalKetidakhadiran = alpa + bolos;
+
+    const catatanWali = (db.catatanWali || []).filter(cw => cw.siswaId === s.id);
+    const jurnalAsuhan = (db.jurnalBimbingan || []).filter(jb => jb.siswaId === s.id);
+    const totalKasusWali = catatanWali.length;
+
+    const lowGrades = (db.nilai || []).filter(n => n.siswaId === s.id && typeof n.nilai === 'number' && n.nilai < 75);
+
+    const layananList = (db.layananBK || []).filter(bk => bk.siswaId === s.id);
+    const hasActiveBK = layananList.some(bk => bk.status === "Dalam Proses");
+    const hasFinishedBK = layananList.some(bk => bk.status === "Tuntas");
+
+    let level = "aman";
+    let score = 0;
+
+    if (alpa >= 3 || bolos >= 2 || (catatanWali.length > 0 && totalKetidakhadiran > 0)) {
+      level = "tinggi";
+      score = 3;
+    } else if (alpa > 0 || bolos > 0 || terlambat >= 3 || lowGrades.length > 0 || totalKasusWali > 0) {
+      level = "sedang";
+      score = 2;
+    } else {
+      level = "aman";
+      score = 1;
+    }
+
+    return {
+      student: s,
+      kelas: k,
+      alpa,
+      bolos,
+      terlambat,
+      catatanWali,
+      jurnalAsuhan,
+      lowGradesCount: lowGrades.length,
+      layananCount: layananList.length,
+      hasActiveBK,
+      hasFinishedBK,
+      level,
+      score
+    };
+  });
+
+  // Urutkan dari rawan tinggi ke aman
+  mappedData.sort((a, b) => b.score - a.score || (b.alpa + b.bolos) - (a.alpa + a.bolos));
+
+  const totalTinggi = mappedData.filter(x => x.level === "tinggi").length;
+  const totalSedang = mappedData.filter(x => x.level === "sedang").length;
+  const totalAman = mappedData.filter(x => x.level === "aman").length;
+  const totalDilayani = mappedData.filter(x => x.layananCount > 0).length;
+
+  const kelasOptions = [
+    '<option value="ALL">Semua Kelas</option>',
+    ...kelasList.map(k => `<option value="${k.id}">${k.tingkat ? k.tingkat + ' - ' : ''}${k.nama}</option>`)
+  ].join("");
+
+  container.innerHTML = `
+    <!-- Top Action and Stats Bar -->
+    <div class="card" style="margin-bottom: 20px;">
+      <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 14px; margin-bottom: 14px;">
+        <div>
+          <h3 style="margin: 0; font-size: 1.15rem; color: var(--text-main);">
+            <i class="fas fa-triangle-exclamation" style="color: #dc2626;"></i> Peta Kerawanan & Deteksi Dini Siswa
+          </h3>
+          <p style="margin: 4px 0 0; font-size: 0.8rem; color: var(--text-muted);">
+            Sistem terintegrasi Guru BK memantau akumulasi alpa, bolos, catatan wali kelas, dan kendala nilai untuk intervensi cepat.
+          </p>
+        </div>
+        <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+          <button type="button" class="btn btn-secondary" onclick="window.print()">
+            <i class="fas fa-print"></i> Cetak Peta Kerawanan
+          </button>
+        </div>
+      </div>
+
+      <!-- 4 Quick Counter Pills -->
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; padding: 12px 0; border-top: 1px solid var(--border-color); border-bottom: 1px solid var(--border-color);">
+        <div style="display: flex; align-items: center; gap: 10px;">
+          <span class="badge-rawan-tinggi" style="width: 32px; height: 32px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 1rem;">
+            <i class="fas fa-circle-exclamation"></i>
+          </span>
+          <div>
+            <div style="font-size: 0.72rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase;">Rawan Tinggi</div>
+            <div style="font-size: 1.2rem; font-weight: 800; color: #dc2626;">${totalTinggi} Siswa</div>
+          </div>
+        </div>
+
+        <div style="display: flex; align-items: center; gap: 10px;">
+          <span class="badge-rawan-sedang" style="width: 32px; height: 32px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 1rem;">
+            <i class="fas fa-triangle-exclamation"></i>
+          </span>
+          <div>
+            <div style="font-size: 0.72rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase;">Rawan Sedang</div>
+            <div style="font-size: 1.2rem; font-weight: 800; color: #d97706;">${totalSedang} Siswa</div>
+          </div>
+        </div>
+
+        <div style="display: flex; align-items: center; gap: 10px;">
+          <span class="badge-rawan-rendah" style="width: 32px; height: 32px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 1rem;">
+            <i class="fas fa-circle-check"></i>
+          </span>
+          <div>
+            <div style="font-size: 0.72rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase;">Terpantau Aman</div>
+            <div style="font-size: 1.2rem; font-weight: 800; color: #059669;">${totalAman} Siswa</div>
+          </div>
+        </div>
+
+        <div style="display: flex; align-items: center; gap: 10px;">
+          <span style="width: 32px; height: 32px; border-radius: 8px; background: rgba(124, 58, 237, 0.15); color: #7c3aed; display: flex; align-items: center; justify-content: center; font-size: 1rem;">
+            <i class="fas fa-hand-holding-heart"></i>
+          </span>
+          <div>
+            <div style="font-size: 0.72rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase;">Pernah Konseling BK</div>
+            <div style="font-size: 1.2rem; font-weight: 800; color: #7c3aed;">${totalDilayani} Siswa</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Filters -->
+      <div style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-top: 12px;">
+        <div style="flex: 1; min-width: 180px;">
+          <label style="font-size: 0.74rem; font-weight: 700; color: var(--text-muted); display: block; margin-bottom: 3px;">CARI SISWA:</label>
+          <input type="text" id="filter-peta-search" class="form-control" placeholder="Ketik nama atau NISN siswa..." oninput="filterPetaKerawananBKTable()">
+        </div>
+        <div style="width: 160px;">
+          <label style="font-size: 0.74rem; font-weight: 700; color: var(--text-muted); display: block; margin-bottom: 3px;">TINGKAT KERAWANAN:</label>
+          <select id="filter-peta-level" class="form-control" onchange="filterPetaKerawananBKTable()">
+            <option value="ALL">Semua Kategori</option>
+            <option value="tinggi">Rawan Tinggi</option>
+            <option value="sedang">Rawan Sedang</option>
+            <option value="aman">Terpantau Aman</option>
+          </select>
+        </div>
+        <div style="width: 160px;">
+          <label style="font-size: 0.74rem; font-weight: 700; color: var(--text-muted); display: block; margin-bottom: 3px;">FILTER KELAS:</label>
+          <select id="filter-peta-kelas" class="form-control" onchange="filterPetaKerawananBKTable()">
+            ${kelasOptions}
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <!-- Table of Students Risk Map -->
+    <div class="card">
+      <div class="table-responsive">
+        <table class="table" id="table-peta-kerawanan" style="width: 100%;">
+          <thead>
+            <tr>
+              <th style="width: 35px; text-align: center;">No</th>
+              <th>Nama Siswa & NISN</th>
+              <th>Kelas</th>
+              <th style="text-align: center; width: 65px; color: #ef4444;" title="Alpa">Alpa</th>
+              <th style="text-align: center; width: 65px; color: #b91c1c;" title="Bolos">Bolos</th>
+              <th style="text-align: center; width: 65px; color: #f59e0b;" title="Terlambat">Telat</th>
+              <th>Catatan Kasus Disiplin / Mapel</th>
+              <th style="text-align: center; width: 120px;">Tingkat Kerawanan</th>
+              <th style="text-align: center; width: 110px;">Status BK</th>
+              <th style="text-align: center; width: 150px;">Aksi Cepat BK</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${mappedData.length === 0 ? `
+              <tr><td colspan="10" style="text-align:center; padding:30px; color:var(--text-muted);">Belum ada data siswa terdaftar.</td></tr>
+            ` : mappedData.map((item, idx) => {
+              const s = item.student;
+              const contact = getStudentParentContact(s.id);
+              const badgeClass = item.level === 'tinggi' ? 'badge-rawan-tinggi' : item.level === 'sedang' ? 'badge-rawan-sedang' : 'badge-rawan-rendah';
+              const labelLevel = item.level === 'tinggi' ? 'Rawan Tinggi' : item.level === 'sedang' ? 'Rawan Sedang' : 'Terpantau Aman';
+
+              let issuesSummary = [];
+              if (item.alpa > 0) issuesSummary.push(`${item.alpa}x Alpa`);
+              if (item.bolos > 0) issuesSummary.push(`${item.bolos}x Bolos`);
+              if (item.terlambat >= 3) issuesSummary.push(`${item.terlambat}x Terlambat`);
+              if (item.catatanWali.length > 0) issuesSummary.push(`${item.catatanWali.length} Kasus Wali Kelas`);
+              if (item.lowGradesCount > 0) issuesSummary.push(`${item.lowGradesCount} Mapel < KKM`);
+
+              const defaultGejalaForKonseling = issuesSummary.length > 0 ? issuesSummary.join(", ") : "Konseling bimbingan rutin";
+
+              return `
+                <tr data-level="${item.level}" data-kelas="${item.kelas.id || s.kelasId || ''}" data-search="${(s.nama + ' ' + (s.nisn || '')).toLowerCase()}">
+                  <td style="text-align: center;">${idx + 1}</td>
+                  <td style="font-weight: 700; color: var(--text-main);">
+                    ${s.nama}
+                    <div style="font-size: 0.73rem; color: var(--text-muted); font-weight: normal;">NISN: ${s.nisn || '-'}</div>
+                  </td>
+                  <td><span class="badge" style="background:var(--bg-app); border:1px solid var(--border-color);">${item.kelas.nama}</span></td>
+                  <td style="text-align: center; font-weight: 700; color: ${item.alpa > 0 ? '#ef4444' : 'inherit'};">${item.alpa}</td>
+                  <td style="text-align: center; font-weight: 700; color: ${item.bolos > 0 ? '#b91c1c' : 'inherit'};">${item.bolos}</td>
+                  <td style="text-align: center; font-weight: 600; color: ${item.terlambat > 0 ? '#f59e0b' : 'inherit'};">${item.terlambat}</td>
+                  <td style="font-size: 0.8rem; max-width: 200px;">
+                    ${item.catatanWali.length > 0 ? `
+                      <div style="font-weight: 600; color: #dc2626;"><i class="fas fa-book-bookmark"></i> ${item.catatanWali[item.catatanWali.length - 1].kasus || 'Catatan kasus'}</div>
+                    ` : (issuesSummary.length > 0 ? `<span style="color:var(--text-muted);">${issuesSummary.join(", ")}</span>` : '<span style="color:#10b981;"><i class="fas fa-check"></i> Tertib & Hadir Baik</span>')}
+                  </td>
+                  <td style="text-align: center;">
+                    <span class="badge ${badgeClass}">${labelLevel}</span>
+                  </td>
+                  <td style="text-align: center;">
+                    ${item.hasActiveBK ? `
+                      <span class="badge badge-bk-proses">Sedang BK</span>
+                    ` : (item.hasFinishedBK ? `
+                      <span class="badge badge-bk-selesai">Pernah Selesai</span>
+                    ` : `
+                      <span class="badge" style="background:var(--bg-app); color:var(--text-muted); border:1px solid var(--border-color);">Belum</span>
+                    `)}
+                  </td>
+                  <td style="text-align: center;">
+                    <div style="display: inline-flex; gap: 4px; align-items: center;">
+                      <button type="button" class="btn btn-secondary btn-sm" onclick="openKonselingBKModal(null, '${s.id}', 'Pribadi', '${defaultGejalaForKonseling}')" title="Buka Sesi Konseling BK" style="padding: 4px 7px; color: #ea580c;">
+                        <i class="fas fa-comments"></i> Konseling
+                      </button>
+                      <button type="button" class="btn btn-secondary btn-sm" onclick="openSuratPanggilanBKModal('${s.id}')" title="Surat Panggilan Orang Tua ke Ruang BK" style="padding: 4px 7px;">
+                        <i class="fas fa-envelope-open-text"></i> Panggil
+                      </button>
+                      ${contact.hasPhone ? `
+                        <button type="button" class="btn btn-sm" style="background: #25D366; color: #fff; padding: 4px 7px; border-radius: 6px;" onclick="sendBKStudentWA('${s.id}', 'konsultasi', { pokok: defaultGejalaForKonseling })" title="Chat WA Orang Tua">
+                          <i class="fab fa-whatsapp"></i>
+                        </button>
+                      ` : ''}
+                    </div>
+                  </td>
+                </tr>
+              `;
+            }).join("")}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function filterPetaKerawananBKTable() {
+  const q = (document.getElementById("filter-peta-search")?.value || "").toLowerCase().trim();
+  const lvl = document.getElementById("filter-peta-level")?.value || "ALL";
+  const k = document.getElementById("filter-peta-kelas")?.value || "ALL";
+
+  const rows = document.querySelectorAll("#table-peta-kerawanan tbody tr");
+  rows.forEach(r => {
+    if (!r.hasAttribute("data-level")) return;
+    const rLevel = r.getAttribute("data-level") || "";
+    const rKelas = r.getAttribute("data-kelas") || "";
+    const rSearch = r.getAttribute("data-search") || "";
+
+    const matchQ = !q || rSearch.includes(q);
+    const matchL = lvl === "ALL" || rLevel === lvl;
+    const matchK = k === "ALL" || rKelas === k;
+
+    r.style.display = (matchQ && matchL && matchK) ? "" : "none";
+  });
+}
+
+// ----------------------------------------------------------------------------
+// 4. PEMINATAN & PERENCANAAN KARIR SISWA (STUDI LANJUT SMA)
+// ----------------------------------------------------------------------------
+function renderPeminatanKarirBK(container) {
+  if (!container) container = document.getElementById("content-container") || document.getElementById("content-area");
+  if (!container) return;
+
+  db.peminatanKarirBK = db.peminatanKarirBK || [];
+  const allStudents = db.siswa || [];
+  const kelasList = db.kelas || [];
+
+  // Hitung ringkasan karir
+  let ptnCount = 0;
+  let ptsCount = 0;
+  let kedinasanCount = 0;
+  let tniPolriCount = 0;
+  let kerjaCount = 0;
+
+  db.peminatanKarirBK.forEach(pk => {
+    if (pk.rencanaStudi === "Kuliah (PTN)") ptnCount++;
+    else if (pk.rencanaStudi === "Kuliah (PTS)") ptsCount++;
+    else if (pk.rencanaStudi === "Sekolah Kedinasan") kedinasanCount++;
+    else if (pk.rencanaStudi === "TNI / Polri") tniPolriCount++;
+    else if (pk.rencanaStudi === "Bekerja / Wirausaha") kerjaCount++;
+  });
+
+  const kelasOptions = [
+    '<option value="ALL">Semua Kelas</option>',
+    ...kelasList.map(k => `<option value="${k.id}">${k.tingkat ? k.tingkat + ' - ' : ''}${k.nama}</option>`)
+  ].join("");
+
+  container.innerHTML = `
+    <!-- Action and Stats Header -->
+    <div class="card" style="margin-bottom: 20px;">
+      <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 14px; margin-bottom: 14px;">
+        <div>
+          <h3 style="margin: 0; font-size: 1.15rem; color: var(--text-main);">
+            <i class="fas fa-compass" style="color: #059669;"></i> Peminatan & Perencanaan Karir / Studi Lanjut
+          </h3>
+          <p style="margin: 4px 0 0; font-size: 0.8rem; color: var(--text-muted);">
+            Pendampingan studi lanjut SMA: Pilihan PTN (SNBP / SNBT), Kedinasan, TNI/Polri, dan Pemetaan Minat Bakat.
+          </p>
+        </div>
+        <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+          <button type="button" class="btn btn-primary" onclick="openPeminatanKarirModal()" style="background: linear-gradient(135deg, #059669, #047857); border-color: #047857;">
+            <i class="fas fa-plus"></i> Input Peminatan Siswa
+          </button>
+          <button type="button" class="btn btn-secondary" onclick="exportPeminatanKarirCSV()">
+            <i class="fas fa-file-csv"></i> Export CSV
+          </button>
+          <button type="button" class="btn btn-secondary" onclick="window.print()">
+            <i class="fas fa-print"></i> Cetak Rekap
+          </button>
+        </div>
+      </div>
+
+      <!-- Stats Bar -->
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; padding: 12px 0; border-top: 1px solid var(--border-color); border-bottom: 1px solid var(--border-color);">
+        <div style="text-align: center;">
+          <div style="font-size: 0.72rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase;">Target PTN</div>
+          <div style="font-size: 1.3rem; font-weight: 800; color: #2563eb;">${ptnCount} <span style="font-size: 0.75rem; font-weight: normal;">Siswa</span></div>
+        </div>
+        <div style="text-align: center;">
+          <div style="font-size: 0.72rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase;">Kedinasan</div>
+          <div style="font-size: 1.3rem; font-weight: 800; color: #ea580c;">${kedinasanCount} <span style="font-size: 0.75rem; font-weight: normal;">Siswa</span></div>
+        </div>
+        <div style="text-align: center;">
+          <div style="font-size: 0.72rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase;">TNI / Polri</div>
+          <div style="font-size: 1.3rem; font-weight: 800; color: #059669;">${tniPolriCount} <span style="font-size: 0.75rem; font-weight: normal;">Siswa</span></div>
+        </div>
+        <div style="text-align: center;">
+          <div style="font-size: 0.72rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase;">PTS / Swasta</div>
+          <div style="font-size: 1.3rem; font-weight: 800; color: #7c3aed;">${ptsCount} <span style="font-size: 0.75rem; font-weight: normal;">Siswa</span></div>
+        </div>
+        <div style="text-align: center;">
+          <div style="font-size: 0.72rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase;">Kerja / Wirausaha</div>
+          <div style="font-size: 1.3rem; font-weight: 800; color: #475569;">${kerjaCount} <span style="font-size: 0.75rem; font-weight: normal;">Siswa</span></div>
+        </div>
+      </div>
+
+      <!-- Filter Controls -->
+      <div style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-top: 12px;">
+        <div style="flex: 1; min-width: 180px;">
+          <label style="font-size: 0.74rem; font-weight: 700; color: var(--text-muted); display: block; margin-bottom: 3px;">CARI SISWA / KAMPUS / PRODI:</label>
+          <input type="text" id="filter-karir-search" class="form-control" placeholder="Ketik nama siswa, universitas, atau prodi..." oninput="filterPeminatanKarirBKTable()">
+        </div>
+        <div style="width: 170px;">
+          <label style="font-size: 0.74rem; font-weight: 700; color: var(--text-muted); display: block; margin-bottom: 3px;">FILTER KELAS:</label>
+          <select id="filter-karir-kelas" class="form-control" onchange="filterPeminatanKarirBKTable()">
+            ${kelasOptions}
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <!-- Data Table -->
+    <div class="card">
+      <div class="table-responsive">
+        <table class="table" id="table-peminatan-karir" style="width: 100%;">
+          <thead>
+            <tr>
+              <th style="width: 35px; text-align: center;">No</th>
+              <th>Nama Siswa & NISN</th>
+              <th>Kelas</th>
+              <th>Rencana Pasca-SMA</th>
+              <th>Target Pilihan 1 (Kampus & Prodi)</th>
+              <th>Target Pilihan 2 (Kampus & Prodi)</th>
+              <th>Jalur Masuk</th>
+              <th>Bakat / Minat Siswa</th>
+              <th style="text-align: center; width: 110px;">Aksi</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${allStudents.length === 0 ? `
+              <tr><td colspan="9" style="text-align:center; padding:30px; color:var(--text-muted);">Belum ada data siswa.</td></tr>
+            ` : allStudents.map((s, idx) => {
+              const k = kelasList.find(c => c.id === s.kelasId) || { nama: "-" };
+              const pk = (db.peminatanKarirBK || []).find(x => x.siswaId === s.id);
+              const contact = getStudentParentContact(s.id);
+
+              return `
+                <tr data-kelas="${k.id || s.kelasId || ''}" data-search="${(s.nama + ' ' + (s.nisn || '') + ' ' + (pk ? (pk.rencanaStudi + ' ' + pk.target1 + ' ' + pk.target2) : '')).toLowerCase()}">
+                  <td style="text-align: center;">${idx + 1}</td>
+                  <td style="font-weight: 700; color: var(--text-main);">
+                    ${s.nama}
+                    <div style="font-size: 0.73rem; color: var(--text-muted); font-weight: normal;">NISN: ${s.nisn || '-'}</div>
+                  </td>
+                  <td><span class="badge" style="background:var(--bg-app); border:1px solid var(--border-color);">${k.nama}</span></td>
+                  <td>
+                    ${pk ? `
+                      <span class="badge badge-bk-karir">${pk.rencanaStudi || 'Kuliah (PTN)'}</span>
+                    ` : `
+                      <span class="badge" style="background:var(--bg-app); color:var(--text-muted); border:1px solid var(--border-color);">Belum Diisi</span>
+                    `}
+                  </td>
+                  <td style="max-width: 180px;">
+                    ${pk && pk.target1 ? `<div style="font-weight: 600; font-size: 0.82rem;">${pk.target1}</div>` : '<span style="color:var(--text-muted);">-</span>'}
+                  </td>
+                  <td style="max-width: 180px;">
+                    ${pk && pk.target2 ? `<div style="font-size: 0.82rem; color: var(--text-muted);">${pk.target2}</div>` : '<span style="color:var(--text-muted);">-</span>'}
+                  </td>
+                  <td>
+                    ${pk && pk.jalurMasuk ? `<span class="badge" style="background:rgba(59, 130, 246, 0.12); color:#2563eb;">${pk.jalurMasuk}</span>` : '-'}
+                  </td>
+                  <td style="font-size: 0.8rem; color: var(--text-muted); max-width: 160px;">
+                    ${pk && pk.catatanBakat ? pk.catatanBakat : '-'}
+                  </td>
+                  <td style="text-align: center;">
+                    <div style="display: inline-flex; gap: 4px; align-items: center;">
+                      <button type="button" class="btn btn-secondary btn-sm" onclick="openPeminatanKarirModal('${pk ? pk.id : ''}', '${s.id}')" title="Edit Peminatan Karir" style="padding: 4px 7px;">
+                        <i class="fas fa-edit"></i>
+                      </button>
+                      <button type="button" class="btn btn-secondary btn-sm" onclick="openKonselingBKModal(null, '${s.id}', 'Karir', 'Konsultasi peminatan karir dan studi lanjut')" title="Konseling Karir" style="padding: 4px 7px; color: #059669;">
+                        <i class="fas fa-compass"></i>
+                      </button>
+                      ${contact.hasPhone ? `
+                        <button type="button" class="btn btn-sm" style="background: #25D366; color: #fff; padding: 4px 7px; border-radius: 6px;" onclick="sendBKStudentWA('${s.id}', 'karir', { rencana: pk ? pk.rencanaStudi : 'Studi Lanjut', target: pk ? pk.target1 : 'Perguruan Tinggi' })" title="Chat WA Wali">
+                          <i class="fab fa-whatsapp"></i>
+                        </button>
+                      ` : ''}
+                    </div>
+                  </td>
+                </tr>
+              `;
+            }).join("")}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function filterPeminatanKarirBKTable() {
+  const q = (document.getElementById("filter-karir-search")?.value || "").toLowerCase().trim();
+  const k = document.getElementById("filter-karir-kelas")?.value || "ALL";
+
+  const rows = document.querySelectorAll("#table-peminatan-karir tbody tr");
+  rows.forEach(r => {
+    if (!r.hasAttribute("data-kelas")) return;
+    const rKelas = r.getAttribute("data-kelas") || "";
+    const rSearch = r.getAttribute("data-search") || "";
+
+    const matchQ = !q || rSearch.includes(q);
+    const matchK = k === "ALL" || rKelas === k;
+
+    r.style.display = (matchQ && matchK) ? "" : "none";
+  });
+}
+
+function openPeminatanKarirModal(karirId = null, defaultSiswaId = null) {
+  const existing = karirId ? (db.peminatanKarirBK || []).find(x => x.id === karirId) : ((db.peminatanKarirBK || []).find(x => x.siswaId === defaultSiswaId));
+  const allStudents = db.siswa || [];
+
+  if (allStudents.length === 0) {
+    alert("Belum ada data siswa di database.");
+    return;
+  }
+
+  const activeSiswaId = existing ? existing.siswaId : (defaultSiswaId || allStudents[0].id);
+  const rencanaStudi = existing ? existing.rencanaStudi : "Kuliah (PTN)";
+  const target1 = existing ? (existing.target1 || "") : "";
+  const target2 = existing ? (existing.target2 || "") : "";
+  const jalurMasuk = existing ? existing.jalurMasuk : "SNBP (Prestasi)";
+  const catatanBakat = existing ? (existing.catatanBakat || "") : "";
+
+  const studentOptions = allStudents.map(s => {
+    const k = (db.kelas || []).find(cl => cl.id === s.kelasId) || { nama: "-" };
+    return `<option value="${s.id}" ${s.id === activeSiswaId ? 'selected' : ''}>${s.nama} (${k.nama})</option>`;
+  }).join("");
+
+  const rencanaList = [
+    "Kuliah (PTN)",
+    "Kuliah (PTS)",
+    "Sekolah Kedinasan",
+    "TNI / Polri",
+    "Bekerja / Wirausaha",
+    "Belum Menentukan"
+  ];
+
+  const jalurList = [
+    "SNBP (Prestasi Rapor)",
+    "SNBT (Tes UTBK)",
+    "Seleksi Mandiri PTN",
+    "Ikatan Dinas / Kedinasan",
+    "Seleksi TNI/Polri",
+    "Beasiswa Khusus",
+    "Lainnya"
+  ];
+
+  const bodyHtml = `
+    <form id="form-peminatan-karir" onsubmit="handleSavePeminatanKarir(event, '${existing ? existing.id : ''}')">
+      <div class="form-group" style="margin-bottom: 12px;">
+        <label style="font-weight: 700; font-size: 0.85rem; display: block; margin-bottom: 4px;">Pilih Siswa: *</label>
+        <select id="modal-karir-siswa" class="form-control" required style="font-weight: 600;">
+          ${studentOptions}
+        </select>
+      </div>
+
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px;">
+        <div>
+          <label style="font-weight: 700; font-size: 0.85rem; display: block; margin-bottom: 4px;">Rencana Pasca-SMA: *</label>
+          <select id="modal-karir-rencana" class="form-control" required>
+            ${rencanaList.map(r => `<option value="${r}" ${r === rencanaStudi ? 'selected' : ''}>${r}</option>`).join("")}
+          </select>
+        </div>
+        <div>
+          <label style="font-weight: 700; font-size: 0.85rem; display: block; margin-bottom: 4px;">Jalur Masuk yang Diikuti:</label>
+          <select id="modal-karir-jalur" class="form-control">
+            ${jalurList.map(j => `<option value="${j}" ${j === jalurMasuk ? 'selected' : ''}>${j}</option>`).join("")}
+          </select>
+        </div>
+      </div>
+
+      <div class="form-group" style="margin-bottom: 12px;">
+        <label style="font-weight: 700; font-size: 0.85rem; display: block; margin-bottom: 4px;">Target Pilihan 1 (Perguruan Tinggi & Program Studi):</label>
+        <input type="text" id="modal-karir-target1" class="form-control" placeholder="Contoh: Universitas Halu Oleo - Kedokteran" value="${target1}">
+      </div>
+
+      <div class="form-group" style="margin-bottom: 12px;">
+        <label style="font-weight: 700; font-size: 0.85rem; display: block; margin-bottom: 4px;">Target Pilihan 2 (Perguruan Tinggi & Program Studi Cadangan):</label>
+        <input type="text" id="modal-karir-target2" class="form-control" placeholder="Contoh: Universitas Hasanuddin - Farmasi" value="${target2}">
+      </div>
+
+      <div class="form-group" style="margin-bottom: 12px;">
+        <label style="font-weight: 700; font-size: 0.85rem; display: block; margin-bottom: 4px;">Catatan Minat, Bakat, & Asesmen Psikologi:</label>
+        <textarea id="modal-karir-catatan" class="form-control" rows="3" placeholder="Hasil asesmen minat bakat, rekomendasi rumpun studi (Saintek/Soshum), atau konsultasi karir...">${catatanBakat}</textarea>
+      </div>
+    </form>
+  `;
+
+  const footerHtml = `
+    <button type="button" class="btn btn-secondary" onclick="closeModal()">Batal</button>
+    <button type="button" class="btn btn-primary" onclick="document.getElementById('form-peminatan-karir').requestSubmit()" style="background: linear-gradient(135deg, #059669, #047857); border-color: #047857;">
+      <i class="fas fa-save"></i> Simpan Peminatan Karir
+    </button>
+  `;
+
+  openModal("Input / Perbarui Peminatan Karir Siswa", bodyHtml, footerHtml);
+}
+
+function handleSavePeminatanKarir(event, karirId) {
+  if (event) event.preventDefault();
+
+  const siswaId = document.getElementById("modal-karir-siswa").value;
+  const rencanaStudi = document.getElementById("modal-karir-rencana").value;
+  const jalurMasuk = document.getElementById("modal-karir-jalur").value;
+  const target1 = document.getElementById("modal-karir-target1").value.trim();
+  const target2 = document.getElementById("modal-karir-target2").value.trim();
+  const catatanBakat = document.getElementById("modal-karir-catatan").value.trim();
+
+  if (!siswaId) {
+    alert("Silakan pilih siswa!");
+    return;
+  }
+
+  db.peminatanKarirBK = db.peminatanKarirBK || [];
+
+  const existingIdx = karirId 
+    ? db.peminatanKarirBK.findIndex(x => x.id === karirId)
+    : db.peminatanKarirBK.findIndex(x => x.siswaId === siswaId);
+
+  if (existingIdx !== -1) {
+    db.peminatanKarirBK[existingIdx] = {
+      ...db.peminatanKarirBK[existingIdx],
+      siswaId,
+      rencanaStudi,
+      jalurMasuk,
+      target1,
+      target2,
+      catatanBakat,
+      updatedAt: new Date().toISOString()
+    };
+  } else {
+    db.peminatanKarirBK.push({
+      id: "pk-" + Date.now(),
+      siswaId,
+      rencanaStudi,
+      jalurMasuk,
+      target1,
+      target2,
+      catatanBakat,
+      createdAt: new Date().toISOString()
+    });
+  }
+
+  saveDatabase(true);
+  closeModal();
+  showToast("Data peminatan karir berhasil disimpan!");
+  renderPeminatanKarirBK(document.getElementById("content-container") || document.getElementById("content-area"));
+}
+
+function exportPeminatanKarirCSV() {
+  const list = db.peminatanKarirBK || [];
+  if (list.length === 0) {
+    alert("Belum ada data peminatan karir untuk diekspor.");
+    return;
+  }
+
+  let csv = "No;Nama Siswa;NISN;Kelas;Rencana Pasca-SMA;Jalur Masuk;Pilihan 1;Pilihan 2;Catatan Bakat Minat\r\n";
+  const clean = str => `"${(str || '').replace(/"/g, '""').replace(/\r?\n/g, ' ')}"`;
+
+  (db.siswa || []).forEach((s, idx) => {
+    const k = (db.kelas || []).find(c => c.id === s.kelasId) || { nama: "-" };
+    const pk = list.find(x => x.siswaId === s.id);
+
+    csv += `${idx + 1};${clean(s.nama)};${clean(s.nisn)};${clean(k.nama)};${clean(pk ? pk.rencanaStudi : '')};${clean(pk ? pk.jalurMasuk : '')};${clean(pk ? pk.target1 : '')};${clean(pk ? pk.target2 : '')};${clean(pk ? pk.catatanBakat : '')}\r\n`;
+  });
+
+  downloadCSV(csv, `rekap_peminatan_karir_siswa_${getLocalDateString()}.csv`);
+}
+
+// ----------------------------------------------------------------------------
+// 5. AGENDA & JANJI TEMU BK / HOME VISIT
+// ----------------------------------------------------------------------------
+function renderAgendaBK(container) {
+  if (!container) container = document.getElementById("content-container") || document.getElementById("content-area");
+  if (!container) return;
+
+  db.agendaBK = db.agendaBK || [];
+  const list = [...db.agendaBK].sort((a, b) => new Date(a.tanggal) - new Date(b.tanggal));
+
+  container.innerHTML = `
+    <!-- Top Action Bar -->
+    <div class="card" style="margin-bottom: 20px;">
+      <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 14px;">
+        <div>
+          <h3 style="margin: 0; font-size: 1.15rem; color: var(--text-main);">
+            <i class="fas fa-calendar-check" style="color: #2563eb;"></i> Agenda & Janji Temu Konseling BK
+          </h3>
+          <p style="margin: 4px 0 0; font-size: 0.8rem; color: var(--text-muted);">
+            Jadwal sesi konseling lanjutan, pemanggilan orang tua, dan kunjungan rumah (home visit).
+          </p>
+        </div>
+        <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+          <button type="button" class="btn btn-primary" onclick="openAgendaBKModal()" style="background: linear-gradient(135deg, #2563eb, #1d4ed8);">
+            <i class="fas fa-plus"></i> Tambah Agenda Temu
+          </button>
+          <button type="button" class="btn btn-secondary" onclick="window.print()">
+            <i class="fas fa-print"></i> Cetak Agenda
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Data Table Card -->
+    <div class="card">
+      <div class="table-responsive">
+        <table class="table" style="width: 100%;">
+          <thead>
+            <tr>
+              <th style="width: 35px; text-align: center;">No</th>
+              <th style="width: 110px;">Tanggal</th>
+              <th style="width: 80px;">Jam</th>
+              <th>Nama Siswa & Kelas</th>
+              <th>Jenis Kegiatan</th>
+              <th>Tempat / Lokasi</th>
+              <th>Keterangan / Persiapan</th>
+              <th style="text-align: center; width: 100px;">Status</th>
+              <th style="text-align: center; width: 140px;">Aksi</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${list.length === 0 ? `
+              <tr>
+                <td colspan="9" style="text-align: center; padding: 40px 16px; color: var(--text-muted);">
+                  <i class="fas fa-calendar-xmark" style="font-size: 2.2rem; margin-bottom: 10px; display: block; opacity: 0.4;"></i>
+                  Belum ada agenda janji temu. Klik tombol <strong>+ Tambah Agenda Temu</strong> untuk menjadwalkan.
+                </td>
+              </tr>
+            ` : list.map((item, idx) => {
+              const s = (db.siswa || []).find(x => x.id === item.siswaId) || { nama: "Siswa", kelasId: "" };
+              const k = (db.kelas || []).find(x => x.id === s.kelasId) || { nama: "-" };
+              const contact = getStudentParentContact(s.id);
+              const isDone = item.status === "Selesai";
+
+              return `
+                <tr style="${isDone ? 'opacity: 0.7; background: rgba(16, 185, 129, 0.03);' : ''}">
+                  <td style="text-align: center;">${idx + 1}</td>
+                  <td style="font-weight: 700;">${formatDateIndo(item.tanggal)}</td>
+                  <td>${item.waktu ? 'pk ' + item.waktu : '-'}</td>
+                  <td>
+                    <strong>${s.nama}</strong>
+                    <div style="font-size: 0.73rem; color: var(--text-muted);">Kelas ${k.nama}</div>
+                  </td>
+                  <td style="font-weight: 600; color: var(--text-main);">${item.kegiatan || 'Konseling'}</td>
+                  <td><i class="fas fa-location-dot" style="color: #ea580c; font-size: 0.8rem;"></i> ${item.tempat || 'Ruang BK'}</td>
+                  <td style="font-size: 0.82rem; color: var(--text-muted); max-width: 200px;">${item.keterangan || '-'}</td>
+                  <td style="text-align: center;">
+                    <span class="badge ${isDone ? 'badge-bk-selesai' : 'badge-bk-proses'}">
+                      ${item.status || 'Terjadwal'}
+                    </span>
+                  </td>
+                  <td style="text-align: center;">
+                    <div style="display: inline-flex; gap: 4px; align-items: center;">
+                      <button type="button" class="btn btn-sm ${isDone ? 'btn-secondary' : 'btn-success'}" onclick="toggleStatusAgendaBK('${item.id}')" title="${isDone ? 'Tandai Belum' : 'Tandai Selesai'}" style="padding: 4px 8px;">
+                        <i class="fas ${isDone ? 'fa-rotate-left' : 'fa-check'}"></i>
+                      </button>
+                      ${contact.hasPhone ? `
+                        <button type="button" class="btn btn-sm" style="background:#25D366; color:#fff; padding: 4px 8px; border-radius: 6px;" onclick="sendAgendaReminderWA('${item.id}')" title="Kirim Pengingat WhatsApp">
+                          <i class="fab fa-whatsapp"></i>
+                        </button>
+                      ` : ''}
+                      <button type="button" class="btn btn-secondary btn-sm" onclick="openAgendaBKModal('${item.id}')" title="Edit Agenda" style="padding: 4px 7px;">
+                        <i class="fas fa-edit"></i>
+                      </button>
+                      <button type="button" class="btn btn-danger btn-sm" onclick="deleteAgendaBK('${item.id}')" title="Hapus" style="padding: 4px 7px;">
+                        <i class="fas fa-trash"></i>
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              `;
+            }).join("")}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function openAgendaBKModal(agendaId = null, defaultSiswaId = null) {
+  const existing = agendaId ? (db.agendaBK || []).find(x => x.id === agendaId) : null;
+  const allStudents = db.siswa || [];
+
+  if (allStudents.length === 0) {
+    alert("Belum ada data siswa.");
+    return;
+  }
+
+  const activeSiswaId = existing ? existing.siswaId : (defaultSiswaId || allStudents[0].id);
+  const tanggal = existing ? existing.tanggal : getLocalDateString();
+  const waktu = existing ? (existing.waktu || "09:00") : "09:00";
+  const kegiatan = existing ? existing.kegiatan : "Sesi Konseling Individu Lanjutan";
+  const tempat = existing ? existing.tempat : "Ruang Bimbingan & Konseling";
+  const keterangan = existing ? (existing.keterangan || "") : "";
+  const status = existing ? existing.status : "Terjadwal";
+
+  const studentOptions = allStudents.map(s => {
+    const k = (db.kelas || []).find(cl => cl.id === s.kelasId) || { nama: "-" };
+    return `<option value="${s.id}" ${s.id === activeSiswaId ? 'selected' : ''}>${s.nama} (${k.nama})</option>`;
+  }).join("");
+
+  const kegiatanList = [
+    "Sesi Konseling Individu Lanjutan",
+    "Konseling Kelompok",
+    "Pemanggilan & Konsultasi Orang Tua",
+    "Kunjungan Rumah (Home Visit)",
+    "Bimbingan Karir & Pilihan Jurusan",
+    "Konferensi Kasus Terpadu"
+  ];
+
+  const bodyHtml = `
+    <form id="form-agenda-bk" onsubmit="handleSaveAgendaBK(event, '${agendaId || ''}')">
+      <div class="form-group" style="margin-bottom: 12px;">
+        <label style="font-weight: 700; font-size: 0.85rem; display: block; margin-bottom: 4px;">Pilih Siswa: *</label>
+        <select id="modal-ag-siswa" class="form-control" required style="font-weight: 600;">
+          ${studentOptions}
+        </select>
+      </div>
+
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px;">
+        <div>
+          <label style="font-weight: 700; font-size: 0.85rem; display: block; margin-bottom: 4px;">Tanggal Pertemuan: *</label>
+          <input type="date" id="modal-ag-tanggal" class="form-control" value="${tanggal}" required>
+        </div>
+        <div>
+          <label style="font-weight: 700; font-size: 0.85rem; display: block; margin-bottom: 4px;">Waktu / Jam:</label>
+          <input type="time" id="modal-ag-waktu" class="form-control" value="${waktu}">
+        </div>
+      </div>
+
+      <div class="form-group" style="margin-bottom: 12px;">
+        <label style="font-weight: 700; font-size: 0.85rem; display: block; margin-bottom: 4px;">Jenis Kegiatan / Agenda: *</label>
+        <select id="modal-ag-kegiatan" class="form-control" required>
+          ${kegiatanList.map(kg => `<option value="${kg}" ${kg === kegiatan ? 'selected' : ''}>${kg}</option>`).join("")}
+        </select>
+      </div>
+
+      <div class="form-group" style="margin-bottom: 12px;">
+        <label style="font-weight: 700; font-size: 0.85rem; display: block; margin-bottom: 4px;">Tempat / Ruangan:</label>
+        <input type="text" id="modal-ag-tempat" class="form-control" placeholder="Contoh: Ruang BK / Rumah Siswa" value="${tempat}">
+      </div>
+
+      <div class="form-group" style="margin-bottom: 12px;">
+        <label style="font-weight: 700; font-size: 0.85rem; display: block; margin-bottom: 4px;">Keterangan & Catatan Persiapan:</label>
+        <textarea id="modal-ag-ket" class="form-control" rows="2" placeholder="Catatan berkas yang perlu disiapkan atau materi diskusi...">${keterangan}</textarea>
+      </div>
+
+      <div class="form-group" style="margin-bottom: 12px;">
+        <label style="font-weight: 700; font-size: 0.85rem; display: block; margin-bottom: 4px;">Status Agenda:</label>
+        <select id="modal-ag-status" class="form-control">
+          <option value="Terjadwal" ${status === 'Terjadwal' ? 'selected' : ''}>Terjadwal</option>
+          <option value="Selesai" ${status === 'Selesai' ? 'selected' : ''}>Selesai / Terlaksana</option>
+          <option value="Dibatalkan" ${status === 'Dibatalkan' ? 'selected' : ''}>Dibatalkan</option>
+        </select>
+      </div>
+    </form>
+  `;
+
+  const footerHtml = `
+    <button type="button" class="btn btn-secondary" onclick="closeModal()">Batal</button>
+    <button type="button" class="btn btn-primary" onclick="document.getElementById('form-agenda-bk').requestSubmit()" style="background: linear-gradient(135deg, #2563eb, #1d4ed8);">
+      <i class="fas fa-save"></i> Simpan Agenda
+    </button>
+  `;
+
+  openModal("Jadwalkan Janji Temu Konseling / Home Visit", bodyHtml, footerHtml);
+}
+
+function handleSaveAgendaBK(event, agendaId) {
+  if (event) event.preventDefault();
+
+  const siswaId = document.getElementById("modal-ag-siswa").value;
+  const tanggal = document.getElementById("modal-ag-tanggal").value;
+  const waktu = document.getElementById("modal-ag-waktu").value;
+  const kegiatan = document.getElementById("modal-ag-kegiatan").value;
+  const tempat = document.getElementById("modal-ag-tempat").value.trim();
+  const keterangan = document.getElementById("modal-ag-ket").value.trim();
+  const status = document.getElementById("modal-ag-status").value;
+
+  if (!siswaId || !tanggal) {
+    alert("Silakan lengkapi siswa dan tanggal pertemuan!");
+    return;
+  }
+
+  db.agendaBK = db.agendaBK || [];
+
+  if (agendaId) {
+    const idx = db.agendaBK.findIndex(x => x.id === agendaId);
+    if (idx !== -1) {
+      db.agendaBK[idx] = {
+        ...db.agendaBK[idx],
+        siswaId,
+        tanggal,
+        waktu,
+        kegiatan,
+        tempat,
+        keterangan,
+        status,
+        updatedAt: new Date().toISOString()
+      };
+    }
+  } else {
+    db.agendaBK.push({
+      id: "ag-" + Date.now(),
+      siswaId,
+      tanggal,
+      waktu,
+      kegiatan,
+      tempat,
+      keterangan,
+      status,
+      createdAt: new Date().toISOString()
+    });
+  }
+
+  saveDatabase(true);
+  closeModal();
+  showToast("Agenda berhasil disimpan!");
+
+  const curHash = window.location.hash.substring(1) || "dashboard";
+  if (curHash === "agenda_bk") {
+    renderAgendaBK(document.getElementById("content-container") || document.getElementById("content-area"));
+  } else {
+    renderDashboardGuruBK(document.getElementById("content-container") || document.getElementById("content-area"));
+  }
+}
+
+function toggleStatusAgendaBK(agendaId) {
+  const item = (db.agendaBK || []).find(x => x.id === agendaId);
+  if (!item) return;
+
+  item.status = item.status === "Selesai" ? "Terjadwal" : "Selesai";
+  saveDatabase(true);
+  showToast(`Status agenda diubah menjadi ${item.status}`);
+
+  const curHash = window.location.hash.substring(1) || "dashboard";
+  if (curHash === "agenda_bk") {
+    renderAgendaBK(document.getElementById("content-container") || document.getElementById("content-area"));
+  } else {
+    renderDashboardGuruBK(document.getElementById("content-container") || document.getElementById("content-area"));
+  }
+}
+
+function deleteAgendaBK(id) {
+  if (!confirm("Hapus agenda ini?")) return;
+  db.agendaBK = (db.agendaBK || []).filter(x => x.id !== id);
+  saveDatabase(true);
+  showToast("Agenda berhasil dihapus.");
+  renderAgendaBK(document.getElementById("content-container") || document.getElementById("content-area"));
+}
+
+function sendAgendaReminderWA(agendaId) {
+  const ag = (db.agendaBK || []).find(x => x.id === agendaId);
+  if (!ag) return;
+
+  const s = (db.siswa || []).find(x => x.id === ag.siswaId);
+  const k = (db.kelas || []).find(x => x.id === (s ? s.kelasId : null)) || { nama: "-" };
+  const contact = getStudentParentContact(ag.siswaId);
+
+  if (!contact || !contact.hasPhone) {
+    alert("Nomor HP orang tua siswa ini belum terdaftar di database.");
+    return;
+  }
+
+  const teacherName = (db.guruProfile && db.guruProfile.nama) ? db.guruProfile.nama : "Guru BK";
+  const userSchool = getCurrentSchoolName();
+
+  const msg = 
+`Yth. Bapak/Ibu ${contact.namaWali} (Orang Tua / Wali dari *${s ? s.nama : 'Siswa'}*, Kelas ${k.nama}),
+
+Assalamu'alaikum Warahmatullahi Wabarakatuh / Selamat Siang.
+
+Mengingatkan kembali agenda bimbingan konseling di ${userSchool}:
+
+📌 *Kegiatan:* ${ag.kegiatan || 'Konsultasi BK'}
+📅 *Hari/Tanggal:* ${formatDateIndoFull(ag.tanggal)}
+⏰ *Waktu:* Pukul ${ag.waktu || '09.00'} WITA
+📍 *Tempat:* ${ag.tempat || 'Ruang BK ' + userSchool}
+📝 *Keterangan:* ${ag.keterangan || 'Konsultasi pendampingan perkembangan ananda'}
+
+Mohon konfirmasinya apabila Bapak/Ibu atau ananda siap hadir sesuai jadwal tersebut. Terima kasih atas kerja samanya.
+
+Hormat kami,
+*${teacherName}*
+Guru Bimbingan & Konseling (BK)
+${userSchool}`;
+
+  window.open(`https://wa.me/${contact.cleanPhone}?text=${encodeURIComponent(msg)}`, "_blank");
+}
+
+// ----------------------------------------------------------------------------
+// 6. REKAPITULASI & LAPORAN RESMI BK (FORMAT KEMDIKBUD / RESMI SEKOLAH)
+// ----------------------------------------------------------------------------
+function renderRekapLaporanBK(container) {
+  if (!container) container = document.getElementById("content-container") || document.getElementById("content-area");
+  if (!container) return;
+
+  const bulanNames = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"];
+  const monthStr = String(currentBKMonth + 1).padStart(2, "0");
+  const monthPrefix = `${currentBKYear}-${monthStr}`;
+
+  db.layananBK = db.layananBK || [];
+  const monthServices = db.layananBK.filter(x => x.tanggal && x.tanggal.startsWith(monthPrefix));
+
+  // Hitung distribusi bidang
+  const pribadiCount = monthServices.filter(x => x.bidang === "Pribadi").length;
+  const sosialCount = monthServices.filter(x => x.bidang === "Sosial").length;
+  const belajarCount = monthServices.filter(x => x.bidang === "Belajar").length;
+  const karirCount = monthServices.filter(x => x.bidang === "Karir").length;
+
+  const tuntasCount = monthServices.filter(x => x.status === "Tuntas").length;
+  const prosesCount = monthServices.filter(x => x.status === "Dalam Proses").length;
+  const rujukanCount = monthServices.filter(x => x.status === "Alih Tangan").length;
+
+  const bulanOptions = bulanNames.map((name, idx) => `
+    <option value="${idx}" ${idx === currentBKMonth ? 'selected' : ''}>${name}</option>
+  `).join("");
+
+  container.innerHTML = `
+    <!-- Top Filter Header -->
+    <div class="card" style="margin-bottom: 20px;">
+      <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 14px;">
+        <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+          <div>
+            <label style="font-size: 0.74rem; font-weight: 700; color: var(--text-muted); display: block; margin-bottom: 4px;">PILIH BULAN:</label>
+            <select class="form-control" style="font-weight: 600;" onchange="currentBKMonth = parseInt(this.value); renderRekapLaporanBK(document.getElementById('content-container') || document.getElementById('content-area'));">
+              ${bulanOptions}
+            </select>
+          </div>
+          <div>
+            <label style="font-size: 0.74rem; font-weight: 700; color: var(--text-muted); display: block; margin-bottom: 4px;">TAHUN:</label>
+            <input type="number" class="form-control" style="width: 100px; font-weight: 600;" value="${currentBKYear}" onchange="currentBKYear = parseInt(this.value); renderRekapLaporanBK(document.getElementById('content-container') || document.getElementById('content-area'));">
+          </div>
+        </div>
+
+        <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+          <button type="button" class="btn btn-primary" onclick="printLaporanResmiBK()" style="background: linear-gradient(135deg, #f97316, #ea580c); border-color: #ea580c;">
+            <i class="fas fa-print"></i> Cetak Format Resmi BK
+          </button>
+          <button type="button" class="btn btn-secondary" onclick="exportLaporanBKCSV()">
+            <i class="fas fa-file-csv"></i> Export CSV
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Summary Statistics Grid -->
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; margin-bottom: 20px;">
+      <div class="card" style="padding: 16px;">
+        <div style="font-size: 0.76rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase;">Total Layanan Bulan Ini</div>
+        <div style="font-size: 1.6rem; font-weight: 800; color: #ea580c; margin-top: 4px;">
+          ${monthServices.length} <span style="font-size: 0.85rem; font-weight: 500; color: var(--text-muted);">Sesi</span>
+        </div>
+        <div style="font-size: 0.78rem; color: var(--text-muted); margin-top: 4px;">
+          Periode: ${bulanNames[currentBKMonth]} ${currentBKYear}
+        </div>
+      </div>
+
+      <div class="card" style="padding: 16px;">
+        <div style="font-size: 0.76rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase;">Distribusi Bidang Bimbingan</div>
+        <div style="display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px;">
+          <span class="badge badge-bk-pribadi">Pribadi: ${pribadiCount}</span>
+          <span class="badge badge-bk-sosial">Sosial: ${sosialCount}</span>
+          <span class="badge badge-bk-belajar">Belajar: ${belajarCount}</span>
+          <span class="badge badge-bk-karir">Karir: ${karirCount}</span>
+        </div>
+      </div>
+
+      <div class="card" style="padding: 16px;">
+        <div style="font-size: 0.76rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase;">Ketuntasan Masalah</div>
+        <div style="display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px;">
+          <span class="badge badge-bk-selesai">Tuntas: ${tuntasCount}</span>
+          <span class="badge badge-bk-proses">Proses: ${prosesCount}</span>
+          <span class="badge badge-bk-rujukan">Alih Tangan: ${rujukanCount}</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Printable Official Sheet Container -->
+    <div class="card">
+      <div class="card-header">
+        <h3 style="margin: 0; font-size: 1.05rem;">
+          <i class="fas fa-file-contract"></i> Laporan Pelaksanaan Layanan Bimbingan & Konseling
+        </h3>
+        <p style="margin: 4px 0 0; font-size: 0.8rem; color: var(--text-muted);">
+          Periode: ${bulanNames[currentBKMonth]} ${currentBKYear}
+        </p>
+      </div>
+
+      <div class="table-responsive" style="margin-top: 14px;">
+        <table class="table" style="width: 100%;">
+          <thead>
+            <tr>
+              <th style="width: 35px; text-align: center;">No</th>
+              <th style="width: 100px;">Tanggal</th>
+              <th>Nama Siswa & NISN</th>
+              <th>Kelas</th>
+              <th>Bidang</th>
+              <th>Jenis Layanan</th>
+              <th>Uraian Masalah / Gejala</th>
+              <th>Rencana Tindak Lanjut</th>
+              <th style="text-align: center; width: 95px;">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${monthServices.length === 0 ? `
+              <tr>
+                <td colspan="9" style="text-align: center; padding: 40px; color: var(--text-muted);">
+                  Tidak ada catatan layanan konseling pada bulan ${bulanNames[currentBKMonth]} ${currentBKYear}.
+                </td>
+              </tr>
+            ` : monthServices.map((item, idx) => {
+              const s = (db.siswa || []).find(x => x.id === item.siswaId) || { nama: "Siswa", nisn: "", kelasId: "" };
+              const k = (db.kelas || []).find(x => x.id === (item.kelasId || s.kelasId)) || { nama: "-" };
+
+              return `
+                <tr>
+                  <td style="text-align: center;">${idx + 1}</td>
+                  <td>${formatDateIndo(item.tanggal)}</td>
+                  <td style="font-weight: 600;">${s.nama}</td>
+                  <td>${k.nama}</td>
+                  <td>${item.bidang || 'Pribadi'}</td>
+                  <td>${item.jenisLayanan || 'Konseling Individu'}</td>
+                  <td style="max-width: 240px; font-size: 0.82rem;">${item.gejala || '-'}</td>
+                  <td style="max-width: 220px; font-size: 0.82rem;">${item.tindakLanjut || '-'}</td>
+                  <td style="text-align: center;">
+                    <span class="badge ${item.status === 'Tuntas' ? 'badge-bk-selesai' : item.status === 'Alih Tangan' ? 'badge-bk-rujukan' : 'badge-bk-proses'}">
+                      ${item.status || 'Dalam Proses'}
+                    </span>
+                  </td>
+                </tr>
+              `;
+            }).join("")}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function printLaporanResmiBK() {
+  const bulanNames = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"];
+  const monthStr = String(currentBKMonth + 1).padStart(2, "0");
+  const monthPrefix = `${currentBKYear}-${monthStr}`;
+  const monthServices = (db.layananBK || []).filter(x => x.tanggal && x.tanggal.startsWith(monthPrefix));
+
+  const teacherName = (db.guruProfile && db.guruProfile.nama) ? db.guruProfile.nama : "Guru BK";
+  const teacherNip = (db.guruProfile && db.guruProfile.nip) ? `NIP. ${db.guruProfile.nip}` : "-";
+  const kepalaSekolah = (db.guruProfile && db.guruProfile.kepalaSekolah) ? db.guruProfile.kepalaSekolah : "Kepala Sekolah, M.Pd.";
+  const kepalaNip = (db.guruProfile && db.guruProfile.kepalaSekolahNip) ? `NIP. ${db.guruProfile.kepalaSekolahNip}` : "-";
+  const userSchool = getCurrentSchoolName();
+  const schoolAddress = (db.guruProfile && db.guruProfile.alamat) ? db.guruProfile.alamat : "Sulawesi Tenggara";
+
+  const win = window.open("", "_blank");
+  win.document.write(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Laporan Resmi Layanan BK - ${bulanNames[currentBKMonth]} ${currentBKYear}</title>
+      <style>
+        body { font-family: 'Times New Roman', Times, serif; margin: 20mm 15mm; color: #000; line-height: 1.5; font-size: 12pt; }
+        .kop { text-align: center; border-bottom: 3px double #000; padding-bottom: 10px; margin-bottom: 16px; }
+        .kop h2 { margin: 0; font-size: 14pt; text-transform: uppercase; font-weight: bold; }
+        .kop h3 { margin: 2px 0; font-size: 16pt; text-transform: uppercase; font-weight: bold; }
+        .kop p { margin: 0; font-size: 10pt; font-style: italic; }
+        h4 { text-align: center; margin: 16px 0 6px; font-size: 13pt; text-transform: uppercase; }
+        .subtitle { text-align: center; margin: 0 0 16px; font-size: 11pt; }
+        table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 10pt; }
+        th, td { border: 1px solid #000; padding: 6px 8px; vertical-align: top; }
+        th { background: #f2f2f2; text-align: center; font-weight: bold; }
+        .ttd-box { margin-top: 36px; display: flex; justify-content: space-between; text-align: center; font-size: 11pt; page-break-inside: avoid; }
+        .ttd-col { width: 45%; }
+        .ttd-space { height: 70px; }
+        @media print {
+          @page { size: A4 landscape; margin: 15mm; }
+        }
+      </style>
+    </head>
+    <body>
+      <div class="kop">
+        <h2>PEMERINTAH DAERAH PROVINSI SULAWESI TENGGARA</h2>
+        <h2>DINAS PENDIDIKAN DAN KEBUDAYAAN</h2>
+        <h3>${userSchool}</h3>
+        <p>${schoolAddress}</p>
+      </div>
+
+      <h4>LAPORAN PELAKSANAAN PELAYANAN BIMBINGAN DAN KONSELING (BK)</h4>
+      <div class="subtitle">Bulan: ${bulanNames[currentBKMonth]} ${currentBKYear}</div>
+
+      <table>
+        <thead>
+          <tr>
+            <th style="width: 30px;">No</th>
+            <th style="width: 80px;">Tanggal</th>
+            <th>Nama Siswa</th>
+            <th style="width: 70px;">Kelas</th>
+            <th style="width: 80px;">Bidang</th>
+            <th style="width: 110px;">Jenis Layanan</th>
+            <th>Uraian Masalah / Gejala</th>
+            <th>Rencana Tindak Lanjut (RTL)</th>
+            <th style="width: 75px;">Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${monthServices.length === 0 ? `
+            <tr><td colspan="9" style="text-align:center; padding: 20px;">Tidak ada pelaksanaan layanan pada bulan ini.</td></tr>
+          ` : monthServices.map((item, idx) => {
+            const s = (db.siswa || []).find(x => x.id === item.siswaId) || { nama: "Siswa", kelasId: "" };
+            const k = (db.kelas || []).find(x => x.id === (item.kelasId || s.kelasId)) || { nama: "-" };
+            return `
+              <tr>
+                <td style="text-align: center;">${idx + 1}</td>
+                <td>${item.tanggal}</td>
+                <td><strong>${s.nama}</strong></td>
+                <td style="text-align: center;">${k.nama}</td>
+                <td>${item.bidang || 'Pribadi'}</td>
+                <td>${item.jenisLayanan || 'Konseling'}</td>
+                <td>${item.gejala || '-'}</td>
+                <td>${item.tindakLanjut || '-'}</td>
+                <td style="text-align: center;">${item.status || 'Tuntas'}</td>
+              </tr>
+            `;
+          }).join("")}
+        </tbody>
+      </table>
+
+      <div class="ttd-box">
+        <div class="ttd-col">
+          <div>Mengetahui,</div>
+          <div>Kepala Sekolah</div>
+          <div class="ttd-space"></div>
+          <div style="font-weight: bold; text-decoration: underline;">${kepalaSekolah}</div>
+          <div>${kepalaNip}</div>
+        </div>
+        <div class="ttd-col">
+          <div>Lasolo, ${formatDateIndo(getLocalDateString())}</div>
+          <div>Guru Bimbingan & Konseling (BK)</div>
+          <div class="ttd-space"></div>
+          <div style="font-weight: bold; text-decoration: underline;">${teacherName}</div>
+          <div>${teacherNip}</div>
+        </div>
+      </div>
+
+      <script>
+        window.onload = function() {
+          window.print();
+        }
+      </script>
+    </body>
+    </html>
+  `);
+  win.document.close();
+}
+
+function exportLaporanBKCSV() {
+  exportKonselingBKCSV();
+}
+
+// ----------------------------------------------------------------------------
+// 7. SURAT RESMI BK (SURAT PANGGILAN & HOME VISIT)
+// ----------------------------------------------------------------------------
+function openSuratPanggilanBKModal(siswaId, defaultTanggal = null) {
+  const s = (db.siswa || []).find(x => x.id === siswaId);
+  if (!s) return;
+
+  const k = (db.kelas || []).find(x => x.id === s.kelasId) || { nama: "Kelas" };
+  const contact = getStudentParentContact(s.id);
+  const teacherName = (db.guruProfile && db.guruProfile.nama) ? db.guruProfile.nama : "Guru BK";
+  const teacherNip = (db.guruProfile && db.guruProfile.nip) ? `NIP. ${db.guruProfile.nip}` : "-";
+  const userSchool = getCurrentSchoolName();
+  const address = (db.guruProfile && db.guruProfile.alamat) ? db.guruProfile.alamat : "Sulawesi Tenggara";
+
+  const tglPanggilan = defaultTanggal || getLocalDateString();
+  const noSurat = `421.3/BK-${userSchool.replace(/[^a-zA-Z0-9]/g, '').slice(0, 8).toUpperCase()}/${new Date().getFullYear()}/${Math.floor(100 + Math.random() * 900)}`;
+
+  const bodyHtml = `
+    <div id="print-surat-panggilan" class="surat-bk-sheet">
+      <div class="kop-surat-bk">
+        <div>
+          <h2>DINAS PENDIDIKAN DAN KEBUDAYAAN</h2>
+          <h3>${userSchool}</h3>
+          <p>${address}</p>
+        </div>
+      </div>
+
+      <table style="width:100%; border-collapse:collapse; margin-bottom:16px; font-size:11pt;">
+        <tr>
+          <td style="width:70px;">Nomor</td>
+          <td style="width:10px;">:</td>
+          <td>${noSurat}</td>
+          <td style="text-align:right;">${formatDateIndo(tglPanggilan)}</td>
+        </tr>
+        <tr>
+          <td>Lampiran</td>
+          <td>:</td>
+          <td>-</td>
+        </tr>
+        <tr>
+          <td>Perihal</td>
+          <td>:</td>
+          <td><strong>Undangan Konsultasi Bimbingan & Konseling</strong></td>
+        </tr>
+      </table>
+
+      <div style="margin-bottom:14px; font-size:11pt;">
+        Kepada Yth.<br>
+        <strong>Bapak / Ibu Orang Tua / Wali dari:</strong><br>
+        Ananda: <strong>${s.nama}</strong> (Kelas ${k.nama})<br>
+        di Tempat
+      </div>
+
+      <div style="margin-bottom:14px; text-align:justify; font-size:11pt; line-height:1.6;">
+        Assalamu'alaikum Warahmatullahi Wabarakatuh / Dengan Hormat,<br><br>
+        Sehubungan dengan perlunya koordinasi dan konsultasi bersama demi kelancaran dan perbaikan proses perkembangan belajar serta pembinaan ananda di sekolah, kami mengharapkan kehadiran Bapak/Ibu pada:
+      </div>
+
+      <table style="width:90%; margin:0 auto 16px auto; font-size:11pt; border-collapse:collapse;">
+        <tr>
+          <td style="width:130px; padding:4px 0;">Hari / Tanggal</td>
+          <td style="width:10px;">:</td>
+          <td><strong>${formatDateIndoFull(tglPanggilan)}</strong></td>
+        </tr>
+        <tr>
+          <td style="padding:4px 0;">Waktu</td>
+          <td style="width:10px;">:</td>
+          <td>Pukul 09.00 WITA s.d Selesai</td>
+        </tr>
+        <tr>
+          <td style="padding:4px 0;">Tempat</td>
+          <td style="width:10px;">:</td>
+          <td>Ruang Bimbingan & Konseling (BK) ${userSchool}</td>
+        </tr>
+        <tr>
+          <td style="padding:4px 0;">Keperluan</td>
+          <td style="width:10px;">:</td>
+          <td>Konsultasi Perkembangan & Pendampingan Karakter Ananda</td>
+        </tr>
+      </table>
+
+      <div style="margin-bottom:20px; text-align:justify; font-size:11pt; line-height:1.6;">
+        Mengingat pentingnya pertemuan ini demi kebaikan dan kelanjutan masa depan ananda, kami sangat mengharapkan kehadiran Bapak/Ibu tepat pada waktunya. Atas perhatian dan kerja samanya, kami ucapkan terima kasih.
+      </div>
+
+      <div style="display:flex; justify-content:flex-end; text-align:center; font-size:11pt; margin-top:20px;">
+        <div style="width:240px;">
+          <div>Guru Bimbingan & Konseling,</div>
+          <div style="height:65px;"></div>
+          <div style="font-weight:bold; text-decoration:underline;">${teacherName}</div>
+          <div>${teacherNip}</div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  const footerHtml = `
+    <button type="button" class="btn btn-secondary" onclick="closeModal()">Tutup</button>
+    ${contact.hasPhone ? `
+      <button type="button" class="btn btn-success" style="background:#25D366; border-color:#25D366;" onclick="sendBKStudentWA('${s.id}', 'panggilan_resmi', { noSurat, tgl: formatDateIndoFull(tglPanggilan) })">
+        <i class="fab fa-whatsapp"></i> Kirim Surat via WA
+      </button>
+    ` : ''}
+    <button type="button" class="btn btn-primary" onclick="window.print()" style="background: linear-gradient(135deg, #f97316, #ea580c); border-color: #ea580c;">
+      <i class="fas fa-print"></i> Cetak Surat Resmi
+    </button>
+  `;
+
+  openModal("Surat Panggilan Orang Tua ke Ruang BK", bodyHtml, footerHtml, true);
+}
+
+// ----------------------------------------------------------------------------
+// 8. TEMPLATE PESAN WHATSAPP KHUSUS GURU BK
+// ----------------------------------------------------------------------------
+function sendBKStudentWA(siswaId, templateType = "konsultasi", extraData = {}) {
+  const contact = getStudentParentContact(siswaId);
+  const s = (db.siswa || []).find(x => x.id === siswaId);
+  const k = (db.kelas || []).find(x => x.id === (s ? s.kelasId : null)) || { nama: "-" };
+
+  if (!contact || !contact.hasPhone) {
+    alert("Nomor WhatsApp orang tua belum terdaftar di database.");
+    return;
+  }
+
+  const teacherName = (db.guruProfile && db.guruProfile.nama) ? db.guruProfile.nama : "Guru BK";
+  const userSchool = getCurrentSchoolName();
+  let message = "";
+
+  if (templateType === "panggilan_resmi") {
+    message =
+`Yth. Bapak/Ibu ${contact.namaWali} (Orang Tua / Wali dari ananda *${s ? s.nama : 'Siswa'}*, Kelas ${k.nama}),
+
+Assalamu'alaikum Warahmatullahi Wabarakatuh / Selamat Siang.
+
+Sehubungan dengan surat undangan resmi dari ${userSchool} No. ${extraData.noSurat || 'Undangan BK'}, kami mengundang Bapak/Ibu untuk hadir ke sekolah:
+
+📅 *Hari/Tanggal:* ${extraData.tgl || formatDateIndoFull(getLocalDateString())}
+⏰ *Pukul:* 09.00 WITA
+📍 *Tempat:* Ruang Bimbingan & Konseling (BK) ${userSchool}
+📝 *Agenda:* Konsultasi perkembangan dan pembinaan ananda di sekolah
+
+Mohon konfirmasi kesediaan kehadiran Bapak/Ibu. Terima kasih atas kerja sama dan perhatiannya.
+
+Hormat kami,
+*${teacherName}*
+Guru Bimbingan & Konseling (BK)
+${userSchool}`;
+  } else if (templateType === "karir") {
+    message =
+`Yth. Bapak/Ibu ${contact.namaWali} (Orang Tua / Wali dari ananda *${s ? s.nama : 'Siswa'}*, Kelas ${k.nama}),
+
+Assalamu'alaikum Warahmatullahi Wabarakatuh / Selamat Siang.
+
+Kami dari Guru BK ${userSchool} ingin menginformasikan terkait rencana studi lanjut dan peminatan karir ananda *${s ? s.nama : ''}*. Ananda memiliki minat dan potensi untuk melanjutkan ke *${extraData.rencana || 'Perguruan Tinggi'}* dengan target *${extraData.target || 'Kampus Pilihan'}*.
+
+Mohon dukungan dan doa Bapak/Ibu di rumah agar ananda senantiasa termotivasi mempersiapkan nilai dan prestasinya. Bila ada hal yang ingin didiskusikan terkait jalur masuk (SNBP / SNBT / Kedinasan), kami siap membantu berkonsultasi.
+
+Hormat kami,
+*${teacherName}*
+Guru Bimbingan & Konseling (BK)
+${userSchool}`;
+  } else {
+    message =
+`Yth. Bapak/Ibu ${contact.namaWali} (Orang Tua / Wali dari ananda *${s ? s.nama : 'Siswa'}*, Kelas ${k.nama}),
+
+Assalamu'alaikum Warahmatullahi Wabarakatuh / Selamat Siang.
+
+Kami dari pihak sekolah (${teacherName}, Guru Bimbingan & Konseling ${userSchool}) ingin bersilaturahmi dan berkoordinasi secara santun perihal perkembangan belajar ananda di sekolah:
+
+📌 *Hal:* ${extraData.pokok || 'Pendampingan Perkembangan Siswa'}
+📅 *Tanggal:* ${formatDateIndo(getLocalDateString())}
+
+Kami mengharapkan kerja sama dan komunikasi hangat bersama Bapak/Ibu demi kenyamanan, keselamatan, dan keberhasilan belajar ananda.
+
+Bila Bapak/Ibu memiliki waktu luang, kami mengundang untuk dapat berdiskusi melalui WhatsApp atau berkunjung ke Ruang BK. Terima kasih atas perhatiannya.
+
+Hormat kami,
+*${teacherName}*
+Guru Bimbingan & Konseling (BK)
+${userSchool}`;
+  }
+
+  window.open(`https://wa.me/${contact.cleanPhone}?text=${encodeURIComponent(message)}`, "_blank");
+}
+

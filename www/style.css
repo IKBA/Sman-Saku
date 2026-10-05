@@ -860,6 +860,17 @@ header {
   color: #7c3aed;
 }
 
+.btn-mode-switcher.mode-gurubk {
+  border-color: rgba(249, 115, 22, 0.55);
+  background: rgba(249, 115, 22, 0.09);
+}
+.btn-mode-switcher.mode-gurubk .mode-icon-circle {
+  background: linear-gradient(135deg, #f97316, #ea580c);
+}
+.btn-mode-switcher.mode-gurubk .mode-active-title {
+  color: #ea580c;
+}
+
 /* Dropdown menu */
 .mode-dropdown-menu {
   position: absolute;
@@ -933,6 +944,11 @@ header {
   border-color: rgba(139, 92, 246, 0.25);
 }
 
+.mode-dropdown-item[data-mode="gurubk"].active {
+  background: rgba(249, 115, 22, 0.09);
+  border-color: rgba(249, 115, 22, 0.28);
+}
+
 .item-icon-box {
   width: 34px;
   height: 34px;
@@ -948,6 +964,7 @@ header {
 .item-icon-box.mapel { background: linear-gradient(135deg, #2563eb, #1d4ed8); }
 .item-icon-box.walikelas { background: linear-gradient(135deg, #10b981, #059669); }
 .item-icon-box.guruwali { background: linear-gradient(135deg, #8b5cf6, #7c3aed); }
+.item-icon-box.gurubk { background: linear-gradient(135deg, #f97316, #ea580c); }
 
 .item-content {
   flex: 1;
@@ -978,6 +995,7 @@ header {
 .item-badge.mapel { background: rgba(37, 99, 235, 0.15); color: #2563eb; }
 .item-badge.walikelas { background: rgba(16, 185, 129, 0.15); color: #059669; }
 .item-badge.guruwali { background: rgba(139, 92, 246, 0.15); color: #7c3aed; }
+.item-badge.gurubk { background: rgba(249, 115, 22, 0.16); color: #ea580c; }
 
 .item-desc {
   font-size: 0.73rem;
@@ -1557,13 +1575,18 @@ tr:hover td {
   left: 0;
   width: 100%;
   height: 100%;
-  background-color: rgba(0,0,0,0.5);
-  backdrop-filter: blur(4px);
+  background-color: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(5px);
+  -webkit-backdrop-filter: blur(5px);
   z-index: 1000;
   align-items: center;
   justify-content: center;
   opacity: 0;
   transition: opacity var(--transition-normal);
+  padding: 16px;
+  box-sizing: border-box;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 .modal.show {
@@ -1575,13 +1598,21 @@ tr:hover td {
   background-color: var(--bg-card);
   border: 1px solid var(--glass-border);
   backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
   border-radius: 16px;
-  width: 90%;
-  max-width: 500px;
-  padding: 24px;
+  width: 100%;
+  max-width: 540px;
+  max-height: calc(100vh - 32px);
+  max-height: calc(100dvh - 32px);
+  display: flex;
+  flex-direction: column;
+  padding: 20px 22px;
   box-shadow: var(--shadow-lg);
-  transform: scale(0.9);
+  transform: scale(0.96);
   transition: transform var(--transition-normal);
+  box-sizing: border-box;
+  margin: auto;
+  overflow: hidden;
 }
 
 .modal.show .modal-content {
@@ -1592,28 +1623,69 @@ tr:hover td {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 20px;
+  margin-bottom: 14px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
 }
 
 .modal-title {
   font-family: var(--font-display);
-  font-size: 1.25rem;
-  font-weight: 600;
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--text-main);
+  margin: 0;
 }
 
 .modal-close {
   background: none;
   border: none;
-  font-size: 1.25rem;
+  font-size: 1.35rem;
+  line-height: 1;
   cursor: pointer;
   color: var(--text-muted);
+  padding: 4px 8px;
+  border-radius: 6px;
+  transition: all var(--transition-fast);
+}
+
+.modal-close:hover {
+  color: var(--text-main);
+  background: rgba(0, 0, 0, 0.05);
+}
+
+.modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  padding-right: 4px;
+}
+
+/* Custom scrollbar for modal-body */
+.modal-body::-webkit-scrollbar {
+  width: 6px;
+}
+.modal-body::-webkit-scrollbar-track {
+  background: transparent;
+}
+.modal-body::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 3px;
+}
+.modal-body::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
 }
 
 .modal-footer {
   display: flex;
   justify-content: flex-end;
   gap: 12px;
-  margin-top: 24px;
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-color);
+  flex-shrink: 0;
 }
 
 /* Attendance Form Styling */
@@ -2414,15 +2486,27 @@ tr:hover td {
   }
 
   /* Modals on Mobile */
+  .modal {
+    padding: 10px !important;
+  }
+
   .modal-content {
-    width: 95% !important;
-    max-width: 95vw !important;
-    max-height: 85vh !important;
-    max-height: 85dvh !important;
-    overflow-y: auto !important;
-    padding: 14px 12px !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    max-height: calc(100vh - 20px) !important;
+    max-height: calc(100dvh - 20px) !important;
+    padding: 14px 14px !important;
     border-radius: 14px !important;
     margin: auto !important;
+    display: flex !important;
+    flex-direction: column !important;
+    overflow: hidden !important;
+  }
+
+  .modal-header {
+    margin-bottom: 10px !important;
+    padding-bottom: 8px !important;
+    flex-shrink: 0 !important;
   }
 
   .modal-header h3, .modal-title {
@@ -2430,10 +2514,15 @@ tr:hover td {
   }
 
   .modal-body {
-    font-size: 0.78rem !important;
+    flex: 1 1 auto !important;
+    min-height: 0 !important;
+    overflow-y: auto !important;
+    font-size: 0.8rem !important;
+    padding-right: 2px !important;
   }
 
   .modal-footer {
+    flex-shrink: 0 !important;
     flex-direction: column !important;
     gap: 6px !important;
     padding-top: 8px !important;
@@ -2787,6 +2876,203 @@ html.android-device * {
   }
 }
 
+/* ==========================================================================
+   MODE GURU BK (BIMBINGAN KONSELING) STYLES
+   ========================================================================== */
+
+.badge-bk-pribadi {
+  background: rgba(124, 58, 237, 0.12);
+  color: #7c3aed;
+  border: 1px solid rgba(124, 58, 237, 0.3);
+  font-weight: 600;
+}
+
+.badge-bk-sosial {
+  background: rgba(2, 132, 199, 0.12);
+  color: #0284c7;
+  border: 1px solid rgba(2, 132, 199, 0.3);
+  font-weight: 600;
+}
+
+.badge-bk-belajar {
+  background: rgba(217, 119, 6, 0.12);
+  color: #d97706;
+  border: 1px solid rgba(217, 119, 6, 0.3);
+  font-weight: 600;
+}
+
+.badge-bk-karir {
+  background: rgba(16, 185, 129, 0.12);
+  color: #059669;
+  border: 1px solid rgba(16, 185, 129, 0.3);
+  font-weight: 600;
+}
+
+.badge-bk-proses {
+  background: rgba(245, 158, 11, 0.15);
+  color: #d97706;
+  font-weight: 600;
+}
+
+.badge-bk-selesai {
+  background: rgba(16, 185, 129, 0.15);
+  color: #059669;
+  font-weight: 600;
+}
+
+.badge-bk-rujukan {
+  background: rgba(139, 92, 246, 0.15);
+  color: #7c3aed;
+  font-weight: 600;
+}
+
+.badge-urgensi-tinggi {
+  background: rgba(239, 68, 68, 0.15);
+  color: #dc2626;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  font-weight: 700;
+}
+
+.badge-urgensi-sedang {
+  background: rgba(249, 115, 22, 0.15);
+  color: #ea580c;
+  border: 1px solid rgba(249, 115, 22, 0.3);
+  font-weight: 600;
+}
+
+.badge-urgensi-rendah {
+  background: rgba(59, 130, 246, 0.12);
+  color: #2563eb;
+  border: 1px solid rgba(59, 130, 246, 0.25);
+  font-weight: 500;
+}
+
+.badge-rawan-tinggi {
+  background: rgba(239, 68, 68, 0.15);
+  color: #dc2626;
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  font-weight: 700;
+}
+
+.badge-rawan-sedang {
+  background: rgba(245, 158, 11, 0.15);
+  color: #d97706;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  font-weight: 600;
+}
+
+.badge-rawan-rendah {
+  background: rgba(16, 185, 129, 0.15);
+  color: #059669;
+  border: 1px solid rgba(16, 185, 129, 0.35);
+  font-weight: 600;
+}
+
+.badge-bk-role {
+  background: rgba(249, 115, 22, 0.15);
+  color: #ea580c;
+  border: 1px solid rgba(249, 115, 22, 0.35);
+  font-weight: 600;
+}
+
+.binaan-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.binaan-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 18px;
+  box-shadow: var(--shadow-sm);
+  transition: all 0.2s ease;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  position: relative;
+  overflow: hidden;
+}
+
+.binaan-card:hover {
+  border-color: #ea580c;
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-md);
+}
+
+.bk-stat-card {
+  padding: 16px;
+  border-radius: 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  box-shadow: var(--shadow-sm);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  transition: transform var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.bk-stat-card:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-md);
+}
+
+.bk-stat-icon {
+  width: 48px;
+  height: 48px;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.3rem;
+  flex-shrink: 0;
+}
+
+.surat-bk-sheet {
+  background: #ffffff;
+  color: #111827;
+  padding: 30px 40px;
+  border-radius: 8px;
+  box-shadow: 0 4px 15px rgba(0, 0, 0, 0.08);
+  max-width: 800px;
+  margin: 0 auto;
+  font-family: 'Times New Roman', Times, serif;
+  line-height: 1.6;
+}
+
+.kop-surat-bk {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+  border-bottom: 3px double #000;
+  padding-bottom: 12px;
+  margin-bottom: 20px;
+  text-align: center;
+}
+
+.kop-surat-bk h2 {
+  font-size: 1.25rem;
+  margin: 0;
+  text-transform: uppercase;
+  font-weight: bold;
+}
+
+.kop-surat-bk h3 {
+  font-size: 1.45rem;
+  margin: 2px 0;
+  text-transform: uppercase;
+  font-weight: bold;
+}
+
+.kop-surat-bk p {
+  font-size: 0.85rem;
+  margin: 0;
+  font-style: italic;
+}
+
 /* Print Styles */
 @media print {
   @page {
@@ -2835,3 +3121,247 @@ html.android-device * {
     color: #000 !important;
   }
 }
+
+/* ========================================================== */
+/* APK DOWNLOAD & INSTALL MODAL STYLING                      */
+/* ========================================================== */
+.modal-content.modal-apk {
+  max-width: 580px;
+}
+
+.apk-download-container {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  font-family: var(--font-primary);
+}
+
+.apk-hero-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 12px 14px;
+  box-shadow: var(--shadow-sm);
+}
+
+.apk-icon-circle {
+  width: 48px;
+  height: 48px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #10b981, #059669);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.6rem;
+  flex-shrink: 0;
+  box-shadow: 0 4px 10px rgba(16, 185, 129, 0.25);
+}
+
+.apk-hero-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.apk-title {
+  margin: 0 0 4px 0;
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--text-main);
+  font-family: var(--font-display);
+}
+
+.apk-meta-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-bottom: 6px;
+}
+
+.apk-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  background: var(--bg-app);
+  color: var(--text-muted);
+  border: 1px solid var(--border-color);
+}
+
+.apk-badge-success {
+  background: rgba(16, 185, 129, 0.12);
+  color: #059669;
+  border-color: rgba(16, 185, 129, 0.25);
+}
+
+.apk-desc {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  line-height: 1.35;
+}
+
+.apk-action-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.btn-download-apk-main {
+  width: 100%;
+  padding: 12px 16px;
+  border-radius: 10px;
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: #ffffff;
+  background: linear-gradient(135deg, #10b981 0%, #047857 100%);
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);
+  transition: all var(--transition-fast);
+}
+
+.btn-download-apk-main:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 16px rgba(16, 185, 129, 0.4);
+  filter: brightness(1.05);
+}
+
+.btn-download-apk-main.downloading {
+  background: linear-gradient(135deg, #6366f1, #4f46e5);
+  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
+}
+
+.apk-sub-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.btn-sub-action {
+  flex: 1;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-main);
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  transition: all var(--transition-fast);
+}
+
+.btn-sub-action:hover {
+  background: var(--bg-app);
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+.apk-guide-card {
+  background: var(--bg-app);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 12px 14px;
+}
+
+.guide-title {
+  margin: 0 0 10px 0;
+  font-size: 0.88rem;
+  font-weight: 700;
+  color: var(--text-main);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.guide-step-item {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 8px;
+  align-items: flex-start;
+}
+
+.guide-step-item:last-child {
+  margin-bottom: 0;
+}
+
+.step-num {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--primary);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.72rem;
+  font-weight: 700;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.step-content {
+  flex: 1;
+  font-size: 0.8rem;
+}
+
+.step-content strong {
+  display: block;
+  color: var(--text-main);
+  margin-bottom: 2px;
+  font-size: 0.82rem;
+}
+
+.step-content p {
+  margin: 0;
+  color: var(--text-muted);
+  line-height: 1.35;
+}
+
+.step-content code {
+  background: var(--bg-card);
+  padding: 1px 4px;
+  border-radius: 4px;
+  border: 1px solid var(--border-color);
+  font-size: 0.76rem;
+  color: var(--primary);
+}
+
+.apk-pwa-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: rgba(245, 158, 11, 0.08);
+  border: 1px dashed rgba(245, 158, 11, 0.35);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 0.78rem;
+  color: var(--text-main);
+}
+
+.btn-pwa-inline {
+  background: var(--primary);
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 0.74rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
