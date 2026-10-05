@@ -2368,6 +2368,65 @@ function getStudentParentContact(studentOrId) {
   };
 }
 
+// Helper untuk metadata mode dalam tindak lanjut
+function getFollowUpModeMeta(modeKey) {
+  switch (modeKey) {
+    case "walikelas":
+      return {
+        label: "Wali Kelas",
+        badgeClass: "badge-mode-walikelas",
+        icon: "fas fa-user-tie",
+        color: "#10b981",
+        bg: "rgba(16, 185, 129, 0.12)",
+        border: "rgba(16, 185, 129, 0.35)"
+      };
+    case "gurubk":
+      return {
+        label: "Guru BK",
+        badgeClass: "badge-mode-gurubk",
+        icon: "fas fa-user-shield",
+        color: "#ea580c",
+        bg: "rgba(234, 88, 12, 0.12)",
+        border: "rgba(234, 88, 12, 0.35)"
+      };
+    case "guruwali":
+      return {
+        label: "Guru Wali",
+        badgeClass: "badge-mode-guruwali",
+        icon: "fas fa-hand-holding-heart",
+        color: "#7c3aed",
+        bg: "rgba(124, 58, 237, 0.12)",
+        border: "rgba(124, 58, 237, 0.35)"
+      };
+    default:
+      return {
+        label: "Guru Mapel",
+        badgeClass: "badge-mode-mapel",
+        icon: "fas fa-chalkboard-user",
+        color: "#2563eb",
+        bg: "rgba(37, 99, 235, 0.12)",
+        border: "rgba(37, 99, 235, 0.35)"
+      };
+  }
+}
+
+// Helper untuk mendeteksi apakah siswa sudah ditindaklanjuti di tanggal tersebut oleh mode mana pun
+function getStudentFollowUpInfo(siswaId, tanggal, recordFollowUp = null) {
+  if (recordFollowUp && recordFollowUp.status === "sudah") {
+    return recordFollowUp;
+  }
+  const matched = (db.absensi || []).find(x =>
+    x.siswaId === siswaId &&
+    x.tanggal === tanggal &&
+    x.followUp &&
+    x.followUp.status === "sudah"
+  );
+  if (matched) {
+    return matched.followUp;
+  }
+  return recordFollowUp || null;
+}
+
 function renderDashboardIntervention(targetDate = null) {
   const container = document.getElementById("dashboard-tindak-lanjut-section");
   if (!container) return;
@@ -2440,7 +2499,10 @@ function renderDashboardIntervention(targetDate = null) {
   const bolosCount = allIssues.filter(a => a.status === "Bolos").length;
   const terlambatCount = allIssues.filter(a => a.status === "Terlambat").length;
   const sakitIzinCount = allIssues.filter(a => a.status === "Sakit" || a.status === "Izin").length;
-  const confirmedCount = allIssues.filter(a => a.followUp && a.followUp.status === "sudah").length;
+  const confirmedCount = allIssues.filter(a => {
+    const fu = getStudentFollowUpInfo(a.siswaId, a.tanggal, a.followUp);
+    return fu && fu.status === "sudah";
+  }).length;
   const pendingCount = allIssues.length - confirmedCount;
 
   // Filter sesuai tab aktif
@@ -2449,8 +2511,24 @@ function renderDashboardIntervention(targetDate = null) {
   else if (activeFilter === 'bolos') filteredIssues = allIssues.filter(a => a.status === "Bolos");
   else if (activeFilter === 'terlambat') filteredIssues = allIssues.filter(a => a.status === "Terlambat");
   else if (activeFilter === 'sakit_izin') filteredIssues = allIssues.filter(a => a.status === "Sakit" || a.status === "Izin");
-  else if (activeFilter === 'belum') filteredIssues = allIssues.filter(a => !a.followUp || a.followUp.status !== "sudah");
-  else if (activeFilter === 'sudah') filteredIssues = allIssues.filter(a => a.followUp && a.followUp.status === "sudah");
+  else if (activeFilter === 'belum') filteredIssues = allIssues.filter(a => {
+    const fu = getStudentFollowUpInfo(a.siswaId, a.tanggal, a.followUp);
+    return !fu || fu.status !== "sudah";
+  });
+  else if (activeFilter === 'sudah') filteredIssues = allIssues.filter(a => {
+    const fu = getStudentFollowUpInfo(a.siswaId, a.tanggal, a.followUp);
+    return fu && fu.status === "sudah";
+  });
+
+  const interventionSearch = (window.activeInterventionSearchQuery || '').toLowerCase().trim();
+  if (interventionSearch) {
+    filteredIssues = filteredIssues.filter(a => {
+      const s = (db.siswa || []).find(x => x.id === a.siswaId);
+      return (s && s.nama && s.nama.toLowerCase().includes(interventionSearch)) ||
+             (s && s.nisn && String(s.nisn).toLowerCase().includes(interventionSearch)) ||
+             (a.mapel && a.mapel.toLowerCase().includes(interventionSearch));
+    });
+  }
 
   // Cari tanggal-tanggal lain yang memiliki catatan masalah absensi
   const otherDatesWithIssues = [...new Set((db.absensi || [])
@@ -2603,14 +2681,56 @@ function renderDashboardIntervention(targetDate = null) {
         avatarBg = "#3b82f6";
       }
 
-      const isConfirmed = a.followUp && a.followUp.status === "sudah";
-      const followUpBadge = isConfirmed
-        ? `<span class="badge" style="background: rgba(16, 185, 129, 0.15); color: #10b981; border: 1px solid #10b981;" title="${a.followUp.catatan || ''}">
-             <i class="fas fa-check-double"></i> Terkonfirmasi (${a.followUp.metode || 'WA'} ${a.followUp.waktu ? a.followUp.waktu : ''})
-           </span>`
-        : `<span class="badge" style="background: rgba(239, 68, 68, 0.12); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.3);">
-             <i class="fas fa-bell"></i> Butuh Tindak Lanjut
-           </span>`;
+      const activeFu = getStudentFollowUpInfo(s.id, a.tanggal, a.followUp);
+      const isConfirmed = Boolean(activeFu && activeFu.status === "sudah");
+
+      let followUpBadge = "";
+      let crossModeNoticeHtml = "";
+
+      if (isConfirmed) {
+        const fuMode = activeFu.mode || "mapel";
+        const fuMeta = getFollowUpModeMeta(fuMode);
+        const fuOleh = activeFu.oleh ? ` (${activeFu.oleh})` : "";
+        const isFromCurrentMode = (fuMode === mode);
+
+        if (isFromCurrentMode) {
+          followUpBadge = `
+            <span class="badge ${fuMeta.badgeClass}" title="${activeFu.catatan || ''}">
+              <i class="fas fa-check-double"></i> Terkonfirmasi (${fuMeta.label} • ${activeFu.metode || 'WA'} ${activeFu.waktu ? activeFu.waktu : ''})
+            </span>
+          `;
+        } else {
+          // Ditampilkan di dashboard mode lain
+          followUpBadge = `
+            <span class="badge ${fuMeta.badgeClass}" style="font-weight: 700; border-width: 1.5px;" title="${activeFu.catatan || ''}">
+              <i class="${fuMeta.icon}"></i> Sudah Ditindaklanjuti (${fuMeta.label})
+            </span>
+          `;
+        }
+
+        crossModeNoticeHtml = `
+          <div class="tl-cross-mode-notice" style="background: ${fuMeta.bg}; border-left: 4px solid ${fuMeta.color}; border: 1px solid ${fuMeta.border}; border-left-width: 4px;">
+            <i class="${fuMeta.icon}" style="color: ${fuMeta.color}; font-size: 0.95rem; margin-top: 2px;"></i>
+            <div style="flex: 1;">
+              <div style="font-size: 0.82rem; color: var(--text-main);">
+                <strong>${isFromCurrentMode ? 'Tindak Lanjut Tercatat' : 'Ditindaklanjuti Mode Lain'}:</strong> 
+                Siswa ini telah ditindaklanjuti oleh <b style="color: ${fuMeta.color};">${fuMeta.label}</b>${fuOleh} via <b>${activeFu.metode || 'WhatsApp'}</b> ${activeFu.waktu ? 'pukul ' + activeFu.waktu : ''}.
+              </div>
+              ${activeFu.catatan ? `
+                <div style="font-size: 0.8rem; color: var(--text-muted); font-style: italic; margin-top: 2px;">
+                  <i class="fas fa-comment-alt" style="font-size: 0.72rem; margin-right: 4px;"></i>"${activeFu.catatan}"
+                </div>
+              ` : ''}
+            </div>
+          </div>
+        `;
+      } else {
+        followUpBadge = `
+          <span class="badge" style="background: rgba(239, 68, 68, 0.12); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.3);">
+            <i class="fas fa-bell"></i> Butuh Tindak Lanjut
+          </span>
+        `;
+      }
 
       const initials = s.nama.split(" ").slice(0, 2).map(n => n[0]).join("").toUpperCase();
 
@@ -2620,14 +2740,14 @@ function renderDashboardIntervention(targetDate = null) {
           <div class="tl-guardian-info">
             <span><i class="fas fa-user-shield" style="color: var(--primary);"></i> <b>${contact.namaWali}</b> (${contact.hubungan})</span>
             <span><i class="fas fa-phone-alt" style="color: #10b981;"></i> <b style="font-family: monospace; color: #10b981;">${contact.noHp}</b></span>
-            ${a.followUp && a.followUp.catatan ? `<span style="font-style: italic; color: var(--text-muted);"><i class="fas fa-comment-alt"></i> "${a.followUp.catatan}"</span>` : ''}
+            ${!isConfirmed && a.followUp && a.followUp.catatan ? `<span style="font-style: italic; color: var(--text-muted);"><i class="fas fa-comment-alt"></i> "${a.followUp.catatan}"</span>` : ''}
           </div>
         `;
       } else {
         guardianInfoHtml = `
           <div class="tl-guardian-info" style="color: var(--alpa);">
             <i class="fas fa-phone-slash"></i> Belum ada nomor HP orang tua/wali siswa ini di database
-            ${a.followUp && a.followUp.catatan ? `<span style="font-style: italic; color: var(--text-muted); margin-left: 8px;"><i class="fas fa-comment-alt"></i> "${a.followUp.catatan}"</span>` : ''}
+            ${!isConfirmed && a.followUp && a.followUp.catatan ? `<span style="font-style: italic; color: var(--text-muted); margin-left: 8px;"><i class="fas fa-comment-alt"></i> "${a.followUp.catatan}"</span>` : ''}
           </div>
         `;
       }
@@ -2659,7 +2779,7 @@ function renderDashboardIntervention(targetDate = null) {
         actionButtonsHtml = `
           <div class="tl-actions">
             <button class="btn-wa-action" onclick="openTindakLanjutWA('${a.id}')" title="Kirim Pesan Konfirmasi WhatsApp">
-              <i class="fab fa-whatsapp"></i> Hubungi WA
+              <i class="fab fa-whatsapp"></i> ${isConfirmed ? 'Hubungi Lagi' : 'Hubungi WA'}
             </button>
             <a href="tel:${contact.cleanPhone}" class="btn btn-secondary btn-sm" onclick="markAttendanceFollowUp('${a.id}', 'sudah', 'Telepon')" title="Telepon Langsung" style="display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; padding: 0; border-radius: 8px;">
               <i class="fas fa-phone-alt"></i>
@@ -2700,6 +2820,7 @@ function renderDashboardIntervention(targetDate = null) {
                 ${followUpBadge}
               </div>
               ${guardianInfoHtml}
+              ${crossModeNoticeHtml}
             </div>
           </div>
           ${actionButtonsHtml}
@@ -2749,45 +2870,62 @@ function renderDashboardIntervention(targetDate = null) {
       </div>
 
       ${allIssues.length > 0 ? `
-        <!-- Filter Tabs / Chips -->
-        <div class="tl-filter-bar">
-          <div class="tl-filter-chip ${activeFilter === 'all' ? 'active' : ''}" onclick="setInterventionFilter('all')">
-            Semua Masalah (${allIssues.length})
+        <!-- Filter Tabs / Chips & Pencarian Siswa -->
+        <div style="display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 14px;">
+          <div class="tl-filter-bar" style="margin-bottom: 0;">
+            <div class="tl-filter-chip ${activeFilter === 'all' ? 'active' : ''}" onclick="setInterventionFilter('all')">
+              Semua Masalah (${allIssues.length})
+            </div>
+            ${alpaCount > 0 ? `
+              <div class="tl-filter-chip ${activeFilter === 'alpa' ? 'active' : ''}" onclick="setInterventionFilter('alpa')" style="${activeFilter === 'alpa' ? 'background: #ef4444; border-color: #ef4444;' : 'color: #ef4444;'}">
+                <i class="fas fa-times-circle"></i> Alpa (${alpaCount})
+              </div>
+            ` : ''}
+            ${bolosCount > 0 ? `
+              <div class="tl-filter-chip ${activeFilter === 'bolos' ? 'active' : ''}" onclick="setInterventionFilter('bolos')" style="${activeFilter === 'bolos' ? 'background: #8b5cf6; border-color: #8b5cf6;' : 'color: #8b5cf6;'}">
+                <i class="fas fa-walking"></i> Bolos (${bolosCount})
+              </div>
+            ` : ''}
+            ${terlambatCount > 0 ? `
+              <div class="tl-filter-chip ${activeFilter === 'terlambat' ? 'active' : ''}" onclick="setInterventionFilter('terlambat')" style="${activeFilter === 'terlambat' ? 'background: #f59e0b; border-color: #f59e0b;' : 'color: #f59e0b;'}">
+                <i class="fas fa-clock"></i> Terlambat (${terlambatCount})
+              </div>
+            ` : ''}
+            ${sakitIzinCount > 0 ? `
+              <div class="tl-filter-chip ${activeFilter === 'sakit_izin' ? 'active' : ''}" onclick="setInterventionFilter('sakit_izin')" style="${activeFilter === 'sakit_izin' ? 'background: #3b82f6; border-color: #3b82f6;' : 'color: #3b82f6;'}">
+                <i class="fas fa-envelope-open"></i> Sakit / Izin (${sakitIzinCount})
+              </div>
+            ` : ''}
+            <div class="tl-filter-chip ${activeFilter === 'belum' ? 'active' : ''}" onclick="setInterventionFilter('belum')">
+              <i class="fas fa-bell"></i> Belum Konfirmasi (${pendingCount})
+            </div>
+            ${confirmedCount > 0 ? `
+              <div class="tl-filter-chip ${activeFilter === 'sudah' ? 'active' : ''}" onclick="setInterventionFilter('sudah')">
+                <i class="fas fa-check-circle"></i> Selesai (${confirmedCount})
+              </div>
+            ` : ''}
           </div>
-          ${alpaCount > 0 ? `
-            <div class="tl-filter-chip ${activeFilter === 'alpa' ? 'active' : ''}" onclick="setInterventionFilter('alpa')" style="${activeFilter === 'alpa' ? 'background: #ef4444; border-color: #ef4444;' : 'color: #ef4444;'}">
-              <i class="fas fa-times-circle"></i> Alpa (${alpaCount})
-            </div>
-          ` : ''}
-          ${bolosCount > 0 ? `
-            <div class="tl-filter-chip ${activeFilter === 'bolos' ? 'active' : ''}" onclick="setInterventionFilter('bolos')" style="${activeFilter === 'bolos' ? 'background: #8b5cf6; border-color: #8b5cf6;' : 'color: #8b5cf6;'}">
-              <i class="fas fa-walking"></i> Bolos (${bolosCount})
-            </div>
-          ` : ''}
-          ${terlambatCount > 0 ? `
-            <div class="tl-filter-chip ${activeFilter === 'terlambat' ? 'active' : ''}" onclick="setInterventionFilter('terlambat')" style="${activeFilter === 'terlambat' ? 'background: #f59e0b; border-color: #f59e0b;' : 'color: #f59e0b;'}">
-              <i class="fas fa-clock"></i> Terlambat (${terlambatCount})
-            </div>
-          ` : ''}
-          ${sakitIzinCount > 0 ? `
-            <div class="tl-filter-chip ${activeFilter === 'sakit_izin' ? 'active' : ''}" onclick="setInterventionFilter('sakit_izin')" style="${activeFilter === 'sakit_izin' ? 'background: #3b82f6; border-color: #3b82f6;' : 'color: #3b82f6;'}">
-              <i class="fas fa-envelope-open"></i> Sakit / Izin (${sakitIzinCount})
-            </div>
-          ` : ''}
-          <div class="tl-filter-chip ${activeFilter === 'belum' ? 'active' : ''}" onclick="setInterventionFilter('belum')">
-            <i class="fas fa-bell"></i> Belum Konfirmasi (${pendingCount})
+
+          <div style="min-width: 200px; flex: 1 1 220px; max-width: 320px; position: relative;">
+            <i class="fas fa-search" style="position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: var(--text-muted); font-size: 0.8rem;"></i>
+            <input type="text" id="tl-student-search-input" class="form-control form-control-sm" placeholder="Cari nama siswa / NISN..." value="${window.activeInterventionSearchQuery || ''}" oninput="filterInterventionCards(this.value)" style="padding-left: 30px; font-size: 0.82rem; border-radius: 8px;">
           </div>
-          ${confirmedCount > 0 ? `
-            <div class="tl-filter-chip ${activeFilter === 'sudah' ? 'active' : ''}" onclick="setInterventionFilter('sudah')">
-              <i class="fas fa-check-circle"></i> Selesai (${confirmedCount})
-            </div>
-          ` : ''}
         </div>
       ` : ''}
 
       ${bodyContentHtml}
     </div>
   `;
+}
+
+function filterInterventionCards(query) {
+  window.activeInterventionSearchQuery = query;
+  const q = query.toLowerCase().trim();
+  const items = document.querySelectorAll("#dashboard-tindak-lanjut-section .tl-item");
+  items.forEach(item => {
+    const text = item.textContent.toLowerCase();
+    item.style.display = (!q || text.includes(q)) ? "" : "none";
+  });
 }
 
 function changeDashboardInterventionDate(newDate) {
@@ -2880,6 +3018,11 @@ function openTindakLanjutWA(absensiId) {
     }
   };
 
+  const currentAppModeLocal = typeof currentAppMode !== "undefined" ? currentAppMode : "mapel";
+  const existingFu = getStudentFollowUpInfo(att.siswaId, att.tanggal, att.followUp);
+  const isDiffMode = existingFu && existingFu.status === "sudah" && existingFu.mode && existingFu.mode !== currentAppModeLocal;
+  const existingMeta = existingFu && existingFu.mode ? getFollowUpModeMeta(existingFu.mode) : null;
+
   const modalHtml = `
     <div style="font-size: 0.88rem; line-height: 1.5;">
       <div style="background: rgba(37, 211, 102, 0.08); border: 1px solid rgba(37, 211, 102, 0.3); padding: 12px 14px; border-radius: 10px; margin-bottom: 14px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;">
@@ -2895,6 +3038,18 @@ function openTindakLanjutWA(absensiId) {
           ${contact.noHp}
         </div>
       </div>
+
+      ${isDiffMode ? `
+        <div style="background: ${existingMeta.bg}; border: 1px solid ${existingMeta.border}; border-left: 4px solid ${existingMeta.color}; padding: 10px 12px; border-radius: 8px; margin-bottom: 14px; font-size: 0.83rem;">
+          <div style="font-weight: 700; color: ${existingMeta.color}; display: flex; align-items: center; gap: 6px;">
+            <i class="${existingMeta.icon}"></i> Sudah Pernah Ditindaklanjuti oleh ${existingMeta.label}
+          </div>
+          <div style="color: var(--text-main); margin-top: 3px;">
+            Oleh: <b>${existingFu.oleh || 'Guru'}</b> via <b>${existingFu.metode || 'WhatsApp'}</b> ${existingFu.waktu ? 'pukul ' + existingFu.waktu : ''}
+          </div>
+          ${existingFu.catatan ? `<div style="color: var(--text-muted); font-style: italic; margin-top: 3px;"><i class="fas fa-comment-dots"></i> "${existingFu.catatan}"</div>` : ''}
+        </div>
+      ` : ''}
 
       <div style="margin-bottom: 10px;">
         <label style="font-weight: 600; font-size: 0.82rem; color: var(--text-muted); display: block; margin-bottom: 6px;">
@@ -2948,9 +3103,29 @@ function showTindakLanjutCatatanModal(absensiId) {
   const kelas = (db.kelas || []).find(k => k.id === (att.kelasId || (student ? student.kelasId : null)));
   const contact = getStudentParentContact(att.siswaId);
 
-  const currentStatus = (att.followUp && att.followUp.status) || "belum";
-  const currentMetode = (att.followUp && att.followUp.metode) || "WhatsApp";
-  const currentCatatan = (att.followUp && att.followUp.catatan) || "";
+  const currentAppModeLocal = typeof currentAppMode !== "undefined" ? currentAppMode : "mapel";
+  const currentFu = getStudentFollowUpInfo(att.siswaId, att.tanggal, att.followUp) || {};
+  const currentStatus = currentFu.status || "belum";
+  const currentMetode = currentFu.metode || "WhatsApp";
+  const currentCatatan = currentFu.catatan || "";
+  const fuMode = currentFu.mode || currentAppModeLocal;
+  const fuMeta = getFollowUpModeMeta(fuMode);
+  const isDifferentMode = currentFu.status === "sudah" && currentFu.mode && currentFu.mode !== currentAppModeLocal;
+
+  let crossModeBannerHtml = "";
+  if (isDifferentMode) {
+    crossModeBannerHtml = `
+      <div style="background: ${fuMeta.bg}; border: 1px solid ${fuMeta.border}; border-left: 4px solid ${fuMeta.color}; padding: 10px 12px; border-radius: 8px; margin-bottom: 14px; font-size: 0.83rem;">
+        <div style="font-weight: 700; color: ${fuMeta.color}; display: flex; align-items: center; gap: 6px;">
+          <i class="${fuMeta.icon}"></i> Sudah Ditindaklanjuti oleh ${fuMeta.label}
+        </div>
+        <div style="color: var(--text-main); margin-top: 3px;">
+          Oleh: <b>${currentFu.oleh || 'Guru'}</b> via <b>${currentFu.metode || 'WhatsApp'}</b> ${currentFu.waktu ? 'pukul ' + currentFu.waktu : ''}
+        </div>
+        ${currentFu.catatan ? `<div style="color: var(--text-muted); font-style: italic; margin-top: 3px;"><i class="fas fa-comment-dots"></i> "${currentFu.catatan}"</div>` : ''}
+      </div>
+    `;
+  }
 
   const modalHtml = `
     <form id="form-tl-catatan" onsubmit="handleSaveTindakLanjutCatatan(event, '${absensiId}')">
@@ -2965,6 +3140,8 @@ function showTindakLanjutCatatanModal(absensiId) {
           </div>
         ` : ''}
       </div>
+
+      ${crossModeBannerHtml}
 
       <div class="form-group">
         <label class="form-label" style="font-weight: 600;">Status Tindak Lanjut:</label>
@@ -3012,14 +3189,30 @@ function handleSaveTindakLanjutCatatan(e, absensiId) {
 
   const now = new Date();
   const timeStr = now.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
+  const session = getSession();
+  const currentMode = typeof currentAppMode !== "undefined" ? currentAppMode : "mapel";
+  const guruNama = (session && session.nama) || (db.guruProfile && db.guruProfile.nama) || "Guru";
+  const fuMeta = getFollowUpModeMeta(currentMode);
 
-  att.followUp = {
+  const followUpObj = {
     status: status,
     metode: metode,
     waktu: timeStr,
     tanggal: getLocalDateString(),
-    catatan: catatan
+    catatan: catatan,
+    mode: currentMode,
+    modeLabel: fuMeta.label,
+    oleh: guruNama
   };
+
+  att.followUp = followUpObj;
+
+  // Sinkronkan ke seluruh rekaman kehadiran siswa ini pada tanggal tersebut
+  (db.absensi || []).forEach(other => {
+    if (other.siswaId === att.siswaId && other.tanggal === att.tanggal) {
+      other.followUp = { ...followUpObj };
+    }
+  });
 
   saveDatabase(true);
   closeModal();
@@ -3033,14 +3226,30 @@ function markAttendanceFollowUp(absensiId, status, metode = "Telepon") {
 
   const now = new Date();
   const timeStr = now.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
+  const session = getSession();
+  const currentMode = typeof currentAppMode !== "undefined" ? currentAppMode : "mapel";
+  const guruNama = (session && session.nama) || (db.guruProfile && db.guruProfile.nama) || "Guru";
+  const fuMeta = getFollowUpModeMeta(currentMode);
 
-  att.followUp = {
+  const followUpObj = {
     status: status,
     metode: metode,
     waktu: timeStr,
     tanggal: getLocalDateString(),
-    catatan: `Terkonfirmasi melalui ${metode}`
+    catatan: `Terkonfirmasi melalui ${metode}`,
+    mode: currentMode,
+    modeLabel: fuMeta.label,
+    oleh: guruNama
   };
+
+  att.followUp = followUpObj;
+
+  // Sinkronkan ke seluruh rekaman kehadiran siswa ini pada tanggal tersebut
+  (db.absensi || []).forEach(other => {
+    if (other.siswaId === att.siswaId && other.tanggal === att.tanggal) {
+      other.followUp = { ...followUpObj };
+    }
+  });
 
   saveDatabase(true);
   showToast(`Status berhasil ditandai (${metode})`);
@@ -3349,13 +3558,45 @@ function renderDashboardAcademicAlerts(containerId = "dashboard-akademik-section
         `;
       }
 
-      // Badge follow up
+      // Badge follow up & cross-mode info
       let followUpBadge = "";
+      let crossModeNoticeHtml = "";
+
       if (item.followUp && item.followUp.status === "sudah") {
-        followUpBadge = `
-          <span class="badge" style="background: rgba(16, 185, 129, 0.15); color: #10b981; border: 1px solid #10b981;" title="${item.followUp.catatan || ''}">
-            <i class="fas fa-check-double"></i> Terkonfirmasi (${item.followUp.metode || 'WA'})
-          </span>
+        const fuMode = item.followUp.mode || "walikelas";
+        const fuMeta = getFollowUpModeMeta(fuMode);
+        const fuOleh = item.followUp.oleh ? ` (${item.followUp.oleh})` : "";
+        const isFromCurrentMode = (fuMode === mode);
+
+        if (isFromCurrentMode) {
+          followUpBadge = `
+            <span class="badge ${fuMeta.badgeClass}" title="${item.followUp.catatan || ''}">
+              <i class="fas fa-check-double"></i> Terkonfirmasi (${item.followUp.metode || 'WA'})
+            </span>
+          `;
+        } else {
+          followUpBadge = `
+            <span class="badge ${fuMeta.badgeClass}" style="font-weight: 700; border-width: 1.5px;" title="${item.followUp.catatan || ''}">
+              <i class="${fuMeta.icon}"></i> Sudah Ditindaklanjuti (${fuMeta.label})
+            </span>
+          `;
+        }
+
+        crossModeNoticeHtml = `
+          <div class="tl-cross-mode-notice" style="background: ${fuMeta.bg}; border-left: 4px solid ${fuMeta.color}; border: 1px solid ${fuMeta.border}; border-left-width: 4px; margin-top: 6px;">
+            <i class="${fuMeta.icon}" style="color: ${fuMeta.color}; font-size: 0.95rem; margin-top: 2px;"></i>
+            <div style="flex: 1;">
+              <div style="font-size: 0.82rem; color: var(--text-main);">
+                <strong>${isFromCurrentMode ? 'Tindak Lanjut Tercatat' : 'Ditindaklanjuti Mode Lain'}:</strong> 
+                Siswa ini telah ditindaklanjuti oleh <b style="color: ${fuMeta.color};">${fuMeta.label}</b>${fuOleh} via <b>${item.followUp.metode || 'WhatsApp'}</b> ${item.followUp.waktu ? 'pukul ' + item.followUp.waktu : ''}.
+              </div>
+              ${item.followUp.catatan ? `
+                <div style="font-size: 0.8rem; color: var(--text-muted); font-style: italic; margin-top: 2px;">
+                  <i class="fas fa-comment-alt" style="font-size: 0.72rem; margin-right: 4px;"></i>"${item.followUp.catatan}"
+                </div>
+              ` : ''}
+            </div>
+          </div>
         `;
       } else if (item.followUp && item.followUp.status === "sedang") {
         followUpBadge = `
@@ -3378,14 +3619,14 @@ function renderDashboardAcademicAlerts(containerId = "dashboard-akademik-section
           <div class="tl-guardian-info">
             <span><i class="fas fa-user-shield" style="color: var(--primary);"></i> <b>${contact.namaWali}</b> (${contact.hubungan})</span>
             <span><i class="fas fa-phone-alt" style="color: #10b981;"></i> <b style="font-family: monospace; color: #10b981;">${contact.noHp}</b></span>
-            ${item.followUp && item.followUp.catatan ? `<span style="font-style: italic; color: var(--text-muted);"><i class="fas fa-comment-alt"></i> "${item.followUp.catatan}"</span>` : ''}
+            ${!item.followUp?.status && item.followUp && item.followUp.catatan ? `<span style="font-style: italic; color: var(--text-muted);"><i class="fas fa-comment-alt"></i> "${item.followUp.catatan}"</span>` : ''}
           </div>
         `;
       } else {
         guardianInfoHtml = `
           <div class="tl-guardian-info" style="color: var(--alpa);">
             <i class="fas fa-phone-slash"></i> Belum ada nomor HP orang tua/wali siswa ini di database
-            ${item.followUp && item.followUp.catatan ? `<span style="font-style: italic; color: var(--text-muted); margin-left: 8px;"><i class="fas fa-comment-alt"></i> "${item.followUp.catatan}"</span>` : ''}
+            ${!item.followUp?.status && item.followUp && item.followUp.catatan ? `<span style="font-style: italic; color: var(--text-muted); margin-left: 8px;"><i class="fas fa-comment-alt"></i> "${item.followUp.catatan}"</span>` : ''}
           </div>
         `;
       }
@@ -3414,11 +3655,12 @@ function renderDashboardAcademicAlerts(containerId = "dashboard-akademik-section
 
       // Tombol aksi
       let actionsHtml = "";
+      const isAcademicConfirmed = item.followUp && item.followUp.status === "sudah";
       if (contact && contact.hasPhone) {
         actionsHtml = `
           <div class="tl-actions">
             <button type="button" class="btn-wa-action" onclick="openAcademicAlertWA('${item.id}')" title="Kirim Notifikasi Remedial / Tugas ke WA Wali Murid">
-              <i class="fab fa-whatsapp"></i> Hubungi WA
+              <i class="fab fa-whatsapp"></i> ${isAcademicConfirmed ? 'Hubungi Lagi' : 'Hubungi WA'}
             </button>
             <a href="tel:${contact.cleanPhone}" class="btn btn-secondary btn-sm" title="Telepon Orang Tua" style="display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; padding: 0; border-radius: 8px;">
               <i class="fas fa-phone-alt"></i>
@@ -3475,6 +3717,7 @@ function renderDashboardAcademicAlerts(containerId = "dashboard-akademik-section
                 ${item.tanggal ? `<span style="color: var(--text-muted); font-size: 0.75rem; margin-left: 6px;">• ${formatDateIndo(item.tanggal)}</span>` : ''}
               </div>
               ${guardianInfoHtml}
+              ${crossModeNoticeHtml}
             </div>
           </div>
           ${actionsHtml}
@@ -3639,6 +3882,10 @@ function openAcademicAlertWA(issueId) {
     }
   };
 
+  const currentAppModeLocal = typeof currentAppMode !== "undefined" ? currentAppMode : "mapel";
+  const isDiffMode = item.followUp && item.followUp.status === "sudah" && item.followUp.mode && item.followUp.mode !== currentAppModeLocal;
+  const existingMeta = isDiffMode ? getFollowUpModeMeta(item.followUp.mode) : null;
+
   const modalHtml = `
     <div style="font-size: 0.88rem; line-height: 1.5;">
       <div style="background: rgba(37, 211, 102, 0.08); border: 1px solid rgba(37, 211, 102, 0.3); padding: 12px 14px; border-radius: 10px; margin-bottom: 14px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;">
@@ -3654,6 +3901,18 @@ function openAcademicAlertWA(issueId) {
           ${contact.noHp}
         </div>
       </div>
+
+      ${isDiffMode ? `
+        <div style="background: ${existingMeta.bg}; border: 1px solid ${existingMeta.border}; border-left: 4px solid ${existingMeta.color}; padding: 10px 12px; border-radius: 8px; margin-bottom: 14px; font-size: 0.83rem;">
+          <div style="font-weight: 700; color: ${existingMeta.color}; display: flex; align-items: center; gap: 6px;">
+            <i class="${existingMeta.icon}"></i> Sudah Pernah Ditindaklanjuti oleh ${existingMeta.label}
+          </div>
+          <div style="color: var(--text-main); margin-top: 3px;">
+            Oleh: <b>${item.followUp.oleh || 'Guru'}</b> via <b>${item.followUp.metode || 'WhatsApp'}</b> ${item.followUp.waktu ? 'pukul ' + item.followUp.waktu : ''}
+          </div>
+          ${item.followUp.catatan ? `<div style="color: var(--text-muted); font-style: italic; margin-top: 3px;"><i class="fas fa-comment-dots"></i> "${item.followUp.catatan}"</div>` : ''}
+        </div>
+      ` : ''}
 
       <div style="margin-bottom: 10px;">
         <label style="font-weight: 600; font-size: 0.82rem; color: var(--text-muted); display: block; margin-bottom: 6px;">
@@ -3723,13 +3982,20 @@ function markAcademicFollowUp(issueId, status = "sudah", metode = "WhatsApp", ca
   db.academicFollowUp = db.academicFollowUp || {};
   const now = new Date();
   const timeStr = now.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
+  const session = getSession();
+  const currentMode = typeof currentAppMode !== "undefined" ? currentAppMode : "mapel";
+  const guruNama = (session && session.nama) || (db.guruProfile && db.guruProfile.nama) || "Guru";
+  const fuMeta = getFollowUpModeMeta(currentMode);
 
   db.academicFollowUp[issueId] = {
     status: status,
     metode: metode,
     waktu: timeStr,
     tanggal: getLocalDateString(),
-    catatan: catatan || `Terkonfirmasi melalui ${metode}`
+    catatan: catatan || `Terkonfirmasi melalui ${metode}`,
+    mode: currentMode,
+    modeLabel: fuMeta.label,
+    oleh: guruNama
   };
 
   saveDatabase(true);
@@ -3751,10 +4017,30 @@ function showAcademicFollowUpModal(issueId) {
   const currentMetode = current.metode || "WhatsApp";
   const currentCatatan = current.catatan || "";
 
+  const currentAppModeLocal = typeof currentAppMode !== "undefined" ? currentAppMode : "mapel";
+  const fuMode = current.mode || currentAppModeLocal;
+  const fuMeta = getFollowUpModeMeta(fuMode);
+  const isDifferentMode = current.status === "sudah" && current.mode && current.mode !== currentAppModeLocal;
+
   const isBelowKkm = item.type === "below_kkm";
   const issueDesc = isBelowKkm 
     ? `Nilai ${item.jenis} (${item.label}) = ${item.nilai} di bawah KKM ${item.kkm}` 
     : `Belum menyetor ${item.jenis} (${item.label})`;
+
+  let crossModeBannerHtml = "";
+  if (isDifferentMode) {
+    crossModeBannerHtml = `
+      <div style="background: ${fuMeta.bg}; border: 1px solid ${fuMeta.border}; border-left: 4px solid ${fuMeta.color}; padding: 10px 12px; border-radius: 8px; margin-bottom: 14px; font-size: 0.83rem;">
+        <div style="font-weight: 700; color: ${fuMeta.color}; display: flex; align-items: center; gap: 6px;">
+          <i class="${fuMeta.icon}"></i> Sudah Ditindaklanjuti oleh ${fuMeta.label}
+        </div>
+        <div style="color: var(--text-main); margin-top: 3px;">
+          Oleh: <b>${current.oleh || 'Guru'}</b> via <b>${current.metode || 'WhatsApp'}</b> ${current.waktu ? 'pukul ' + current.waktu : ''}
+        </div>
+        ${current.catatan ? `<div style="color: var(--text-muted); font-style: italic; margin-top: 3px;">Catatan: "${current.catatan}"</div>` : ''}
+      </div>
+    `;
+  }
 
   const modalHtml = `
     <form id="form-academic-catatan" onsubmit="handleSaveAcademicFollowUp(event, '${issueId}')">
@@ -3769,6 +4055,8 @@ function showAcademicFollowUpModal(issueId) {
           </div>
         ` : ''}
       </div>
+
+      ${crossModeBannerHtml}
 
       <div class="form-group">
         <label class="form-label" style="font-weight: 600;">Status Tindak Lanjut Akademik:</label>
@@ -9273,9 +9561,18 @@ function renderAbsensi(container) {
 
       <!-- Tab Content -->
       <div id="absensi-tab-input" class="absensi-tab-content active">
-        <div style="margin-bottom: 20px; max-width: 250px;">
-          <label class="form-label" for="absensi-tanggal-input">Tanggal</label>
-          <input type="date" id="absensi-tanggal-input" class="form-control" value="${todayStr}" onchange="loadAbsensiForm()">
+        <div style="margin-bottom: 20px; display: flex; gap: 15px; flex-wrap: wrap; align-items: flex-end;">
+          <div style="max-width: 250px;">
+            <label class="form-label" for="absensi-tanggal-input">Tanggal</label>
+            <input type="date" id="absensi-tanggal-input" class="form-control" value="${todayStr}" onchange="loadAbsensiForm()">
+          </div>
+          <div style="flex: 1; min-width: 220px; max-width: 360px;">
+            <label class="form-label" for="search-absensi-siswa">Cari Nama Siswa</label>
+            <div style="position: relative;">
+              <i class="fas fa-search" style="position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--text-muted); pointer-events: none;"></i>
+              <input type="text" id="search-absensi-siswa" class="form-control" placeholder="Ketik nama atau NISN..." style="padding-left: 36px;" oninput="filterAbsensiRows(this.value)">
+            </div>
+          </div>
         </div>
         
         <!-- Grid Formulir Absensi -->
@@ -9414,6 +9711,18 @@ function loadAbsensiForm() {
       <button class="btn btn-primary" onclick="submitAbsensiForm()"><i class="fas fa-save"></i> Simpan Absensi Kelas</button>
     </div>
   `;
+
+  const searchInput = document.getElementById("search-absensi-siswa");
+  if (searchInput && searchInput.value) {
+    filterAbsensiRows(searchInput.value);
+  }
+}
+
+function filterAbsensiRows(query) {
+  const q = (query || "").toLowerCase().trim();
+  document.querySelectorAll("#absensi-form-wrapper .attendance-row").forEach(row => {
+    row.style.display = (!q || row.textContent.toLowerCase().includes(q)) ? "" : "none";
+  });
 }
 
 function submitAbsensiForm() {
@@ -9614,8 +9923,13 @@ function viewAbsensiSession(tanggal) {
         </div>
       </div>
       
+      <div style="margin-bottom: 12px; position: relative;">
+        <i class="fas fa-search" style="position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--text-muted); pointer-events: none;"></i>
+        <input type="text" id="modal-absensi-search" class="form-control" placeholder="Cari nama siswa di sesi ini..." style="padding-left: 36px; padding-top: 6px; padding-bottom: 6px; font-size: 0.85rem;" oninput="filterModalAbsensiRows(this.value)">
+      </div>
+
       <div class="table-responsive" style="max-height: 400px; overflow-y: auto;">
-        <table class="nilai-entries-table" style="width:100%; border-collapse: collapse;">
+        <table id="modal-absensi-table" class="nilai-entries-table" style="width:100%; border-collapse: collapse;">
           <thead>
             <tr>
               <th style="width: 50px;">No</th>
@@ -9636,6 +9950,13 @@ function viewAbsensiSession(tanggal) {
   `;
   
   openModal(`Detail Absensi - ${formatDateIndo(tanggal)}`, bodyHtml, footerHtml);
+}
+
+function filterModalAbsensiRows(query) {
+  const q = (query || "").toLowerCase().trim();
+  document.querySelectorAll("#modal-absensi-table tbody tr").forEach(row => {
+    row.style.display = (!q || row.textContent.toLowerCase().includes(q)) ? "" : "none";
+  });
 }
 
 function editAbsensiSession(tanggal) {
@@ -9719,12 +10040,20 @@ function loadAbsensiRekap() {
   wrapper.innerHTML = `
     <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px; flex-wrap:wrap; gap:10px;">
       <h4 style="margin:0; font-size:0.95rem; color:var(--text-main);"><i class="fas fa-list"></i> Ringkasan Kehadiran Siswa</h4>
-      <button class="btn btn-secondary btn-sm" onclick="exportAbsensiRekap('${kelasId}', '${mapel}')">
-        <i class="fas fa-file-excel" style="color:#217346;"></i> Ekspor ke Excel (CSV)
-      </button>
+      <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+        <div style="min-width: 220px; max-width: 300px;">
+          <div style="position: relative;">
+            <i class="fas fa-search" style="position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--text-muted); pointer-events: none;"></i>
+            <input type="text" id="search-absensi-rekap" class="form-control" placeholder="Cari nama atau NISN..." style="padding-left: 36px; padding-top: 6px; padding-bottom: 6px; font-size: 0.85rem;" oninput="filterAbsensiRekapRows(this.value)">
+          </div>
+        </div>
+        <button class="btn btn-secondary btn-sm" onclick="exportAbsensiRekap('${kelasId}', '${mapel}')">
+          <i class="fas fa-file-excel" style="color:#217346;"></i> Ekspor ke Excel (CSV)
+        </button>
+      </div>
     </div>
     <div class="table-responsive">
-      <table class="nilai-entries-table" style="width:100%;">
+      <table id="table-absensi-rekap" class="nilai-entries-table" style="width:100%;">
         <thead>
           <tr>
             <th style="width: 50px;">No</th>
@@ -9746,6 +10075,13 @@ function loadAbsensiRekap() {
       </table>
     </div>
   `;
+}
+
+function filterAbsensiRekapRows(query) {
+  const q = (query || "").toLowerCase().trim();
+  document.querySelectorAll("#table-absensi-rekap tbody tr").forEach(row => {
+    row.style.display = (!q || row.textContent.toLowerCase().includes(q)) ? "" : "none";
+  });
 }
 
 function exportAbsensiRekap(kelasId, mapel) {
@@ -9916,7 +10252,7 @@ function renderNilai(container) {
       </div>
 
       <!-- Filters -->
-      <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:20px; margin-bottom: 25px;">
+      <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap:16px; margin-bottom: 25px;">
         <div>
           <label class="form-label" for="nilai-kelas-select">Kelas</label>
           <select id="nilai-kelas-select" class="form-control" onchange="onNilaiFilterChange()">
@@ -9935,6 +10271,13 @@ function renderNilai(container) {
           <select id="nilai-jenis-select" class="form-control" onchange="onNilaiFilterChange()">
             ${jenisOptionsHtml}
           </select>
+        </div>
+        <div>
+          <label class="form-label" for="search-nilai-siswa">Cari Nama Siswa</label>
+          <div style="position: relative;">
+            <i class="fas fa-search" style="position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--text-muted); pointer-events: none;"></i>
+            <input type="text" id="search-nilai-siswa" class="form-control" placeholder="Ketik nama atau NISN..." style="padding-left: 36px;" oninput="filterNilaiAllTabs(this.value)">
+          </div>
         </div>
       </div>
 
@@ -10141,6 +10484,23 @@ function loadNilaiTable() {
       <button class="btn btn-primary" onclick="submitNilaiForm()"><i class="fas fa-save"></i> Simpan Nilai ${jenis}</button>
     </div>
   `;
+  filterNilaiAllTabs();
+}
+
+function filterNilaiAllTabs(query) {
+  const q = (query !== undefined ? query : (document.getElementById("search-nilai-siswa")?.value || "")).toLowerCase().trim();
+  // Filter input tab
+  document.querySelectorAll("#nilai-table-wrapper .grade-row").forEach(row => {
+    row.style.display = (!q || row.textContent.toLowerCase().includes(q)) ? "" : "none";
+  });
+  // Filter riwayat tab
+  document.querySelectorAll("#nilai-riwayat-wrapper .nilai-riwayat-card").forEach(card => {
+    card.style.display = (!q || card.textContent.toLowerCase().includes(q)) ? "" : "none";
+  });
+  // Filter rekap tab
+  document.querySelectorAll("#nilai-rekap-wrapper tbody tr").forEach(row => {
+    row.style.display = (!q || row.textContent.toLowerCase().includes(q)) ? "" : "none";
+  });
 }
 
 // TAB 2: Riwayat Nilai
@@ -10247,6 +10607,7 @@ function loadNilaiRiwayat() {
   }).join("");
 
   wrapper.innerHTML = cardsHtml;
+  filterNilaiAllTabs();
 }
 
 // TAB 3: Rekap Nilai Akhir
@@ -10315,6 +10676,7 @@ function loadNilaiRekap() {
       </table>
     </div>
   `;
+  filterNilaiAllTabs();
 }
 
 // Format date helper
@@ -12988,10 +13350,16 @@ function renderDashboardWaliKelas(container) {
             Status kehadiran akhir siswa hari ini gabungan dari seluruh guru mata pelajaran yang mengajar (${mapelsRecorded.length > 0 ? mapelsRecorded.join(", ") : "Belum ada mapel"}).
           </p>
         </div>
+        <div style="min-width: 220px; max-width: 320px; width: 100%;">
+          <div style="position: relative;">
+            <i class="fas fa-search" style="position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--text-muted); pointer-events: none;"></i>
+            <input type="text" id="search-dashboard-walikelas" class="form-control" placeholder="Cari nama atau NISN..." style="padding-left: 36px; padding-top: 6px; padding-bottom: 6px; font-size: 0.85rem;" oninput="filterDashboardWaliKelasRows(this.value)">
+          </div>
+        </div>
       </div>
 
       <div class="table-responsive" style="margin-top: 14px;">
-        <table class="table" style="width: 100%;">
+        <table id="dashboard-walikelas-presensi-table" class="table" style="width: 100%;">
           <thead>
             <tr>
               <th style="width: 40px; text-align: center;">No</th>
@@ -13069,6 +13437,13 @@ function renderDashboardWaliKelas(container) {
     renderDashboardIntervention(currentWaliKelasDate);
     renderDashboardAcademicAlerts();
   }, 30);
+}
+
+function filterDashboardWaliKelasRows(query) {
+  const q = (query || "").toLowerCase().trim();
+  document.querySelectorAll("#dashboard-walikelas-presensi-table tbody tr").forEach(row => {
+    row.style.display = (!q || row.textContent.toLowerCase().includes(q)) ? "" : "none";
+  });
 }
 
 
@@ -13310,10 +13685,16 @@ function renderRekapFinalWaliKelas(container) {
             Periode: ${bulanNames[currentWaliKelasMonth]} ${currentWaliKelasYear} • Total Hari Efektif Tercatat: ${uniqueDates.length} hari
           </p>
         </div>
+        <div style="min-width: 220px; max-width: 320px; width: 100%;">
+          <div style="position: relative;">
+            <i class="fas fa-search" style="position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--text-muted); pointer-events: none;"></i>
+            <input type="text" id="search-rekap-final-walikelas" class="form-control" placeholder="Cari nama atau NISN..." style="padding-left: 36px; padding-top: 6px; padding-bottom: 6px; font-size: 0.85rem;" oninput="filterRekapFinalWaliKelasRows(this.value)">
+          </div>
+        </div>
       </div>
 
       <div class="table-responsive" style="margin-top: 14px;">
-        <table class="table" style="width: 100%;">
+        <table id="table-rekap-final-walikelas" class="table" style="width: 100%;">
           <thead>
             <tr>
               <th style="width: 40px; text-align: center;">No</th>
@@ -13358,6 +13739,13 @@ function renderRekapFinalWaliKelas(container) {
       </div>
     </div>
   `;
+}
+
+function filterRekapFinalWaliKelasRows(query) {
+  const q = (query || "").toLowerCase().trim();
+  document.querySelectorAll("#table-rekap-final-walikelas tbody tr").forEach(row => {
+    row.style.display = (!q || row.textContent.toLowerCase().includes(q)) ? "" : "none";
+  });
 }
 
 function exportRekapFinalWaliKelasCSV() {
@@ -13597,10 +13985,16 @@ function renderLedgerNilaiWaliKelas(container) {
             Rekapitulasi perolehan nilai siswa di seluruh mata pelajaran beserta peringkat kelas.
           </p>
         </div>
+        <div style="min-width: 220px; max-width: 320px; width: 100%;">
+          <div style="position: relative;">
+            <i class="fas fa-search" style="position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--text-muted); pointer-events: none;"></i>
+            <input type="text" id="search-ledger-walikelas" class="form-control" placeholder="Cari nama atau NISN..." style="padding-left: 36px; padding-top: 6px; padding-bottom: 6px; font-size: 0.85rem;" oninput="filterLedgerWaliKelasRows(this.value)">
+          </div>
+        </div>
       </div>
 
       <div class="table-responsive" style="margin-top: 14px;">
-        <table class="table" style="width: 100%;">
+        <table id="table-ledger-walikelas" class="table" style="width: 100%;">
           <thead>
             <tr>
               <th style="width: 40px; text-align: center;">Peringkat</th>
@@ -13634,6 +14028,13 @@ function renderLedgerNilaiWaliKelas(container) {
       </div>
     </div>
   `;
+}
+
+function filterLedgerWaliKelasRows(query) {
+  const q = (query || "").toLowerCase().trim();
+  document.querySelectorAll("#table-ledger-walikelas tbody tr").forEach(row => {
+    row.style.display = (!q || row.textContent.toLowerCase().includes(q)) ? "" : "none";
+  });
 }
 
 function exportLedgerNilaiCSV() {
@@ -13724,7 +14125,15 @@ function renderCatatanWaliKelas(container) {
             Catatan kedisiplinan, tindak lanjut pelanggaran/masalah siswa, dan komunikasi dengan orang tua murid.
           </p>
         </div>
-        <span class="badge badge-hadir">${catatanList.length} Total Kasus Dicatat</span>
+        <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+          <div style="min-width: 220px; max-width: 300px;">
+            <div style="position: relative;">
+              <i class="fas fa-search" style="position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--text-muted); pointer-events: none;"></i>
+              <input type="text" id="search-catatan-walikelas" class="form-control" placeholder="Cari nama siswa..." style="padding-left: 36px; padding-top: 6px; padding-bottom: 6px; font-size: 0.85rem;" oninput="filterCatatanWaliKelasRows(this.value)">
+            </div>
+          </div>
+          <span class="badge badge-hadir">${catatanList.length} Total Kasus</span>
+        </div>
       </div>
 
       <div style="margin-top: 14px;">
@@ -13737,13 +14146,13 @@ function renderCatatanWaliKelas(container) {
             </p>
           </div>
         ` : `
-          <div style="display: flex; flex-direction: column; gap: 12px;">
+          <div id="catatan-wali-list-container" style="display: flex; flex-direction: column; gap: 12px;">
             ${catatanList.map(item => {
               const student = db.siswa.find(s => s.id === item.siswaId) || { nama: "Siswa Tidak Ditemukan", nisn: "-" };
               const contact = getStudentParentContact(student);
 
               return `
-                <div class="card" style="padding: 16px; border: 1px solid var(--border-color); background: var(--bg-card); border-left: 4px solid ${item.status === 'Selesai' ? '#10b981' : '#ef4444'};">
+                <div class="card catatan-wali-card-item" style="padding: 16px; border: 1px solid var(--border-color); background: var(--bg-card); border-left: 4px solid ${item.status === 'Selesai' ? '#10b981' : '#ef4444'};">
                   <div style="display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 10px; margin-bottom: 8px;">
                     <div>
                       <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
@@ -13785,6 +14194,13 @@ function renderCatatanWaliKelas(container) {
       </div>
     </div>
   `;
+}
+
+function filterCatatanWaliKelasRows(query) {
+  const q = (query || "").toLowerCase().trim();
+  document.querySelectorAll("#catatan-wali-list-container .catatan-wali-card-item").forEach(card => {
+    card.style.display = (!q || card.textContent.toLowerCase().includes(q)) ? "" : "none";
+  });
 }
 
 function openCatatanWaliModal(catatanId = null, defaultSiswaId = null) {
@@ -14849,7 +15265,15 @@ function renderJurnalBimbinganGuruWali(container) {
     <div class="card">
       <div class="card-header" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
         <span style="font-weight: 700; font-size: 0.95rem;">Riwayat Bimbingan Terdata</span>
-        <span class="badge badge-hadir">${list.length} Sesi Bimbingan</span>
+        <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+          <div style="min-width: 220px; max-width: 300px;">
+            <div style="position: relative;">
+              <i class="fas fa-search" style="position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--text-muted); pointer-events: none;"></i>
+              <input type="text" id="search-jurnal-guruwali" class="form-control" placeholder="Cari nama siswa..." style="padding-left: 36px; padding-top: 6px; padding-bottom: 6px; font-size: 0.85rem;" oninput="filterJurnalBimbinganGuruWali(this.value)">
+            </div>
+          </div>
+          <span class="badge badge-hadir">${list.length} Sesi Bimbingan</span>
+        </div>
       </div>
 
       <div style="margin-top: 14px;">
@@ -14862,13 +15286,13 @@ function renderJurnalBimbinganGuruWali(container) {
             </p>
           </div>
         ` : `
-          <div style="display: flex; flex-direction: column; gap: 12px;">
+          <div id="jurnal-bimbingan-list-container" style="display: flex; flex-direction: column; gap: 12px;">
             ${list.map(jb => {
               const student = db.siswa.find(s => s.id === jb.siswaId) || { nama: "Siswa Tidak Ditemukan", nisn: "-" };
               const kelas = db.kelas.find(k => k.id === student.kelasId) || { nama: "-" };
 
               return `
-                <div class="card" style="padding: 16px; border: 1px solid var(--border-color); background: var(--bg-card); border-left: 4px solid ${jb.status === 'Tuntas' ? '#10b981' : '#7c3aed'};">
+                <div class="card jurnal-bimbingan-card-item" style="padding: 16px; border: 1px solid var(--border-color); background: var(--bg-card); border-left: 4px solid ${jb.status === 'Tuntas' ? '#10b981' : '#7c3aed'};">
                   <div style="display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 10px; margin-bottom: 8px;">
                     <div>
                       <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
@@ -14911,6 +15335,13 @@ function renderJurnalBimbinganGuruWali(container) {
       </div>
     </div>
   `;
+}
+
+function filterJurnalBimbinganGuruWali(query) {
+  const q = (query || "").toLowerCase().trim();
+  document.querySelectorAll("#jurnal-bimbingan-list-container .jurnal-bimbingan-card-item").forEach(card => {
+    card.style.display = (!q || card.textContent.toLowerCase().includes(q)) ? "" : "none";
+  });
 }
 
 function openJurnalBimbinganModal(jurnalId = null, defaultSiswaId = null) {
@@ -15169,11 +15600,19 @@ function renderPantauanAbsensiGuruWali(container) {
             Periode: ${bulanNames[currentWaliKelasMonth]} ${currentWaliKelasYear} • Memantau rekap ketidakhadiran anak asuhan dari laporan seluruh guru mapel.
           </p>
         </div>
-        <span class="badge badge-hadir">${asuhanList.length} Siswa Asuhan</span>
+        <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+          <div style="min-width: 220px; max-width: 300px;">
+            <div style="position: relative;">
+              <i class="fas fa-search" style="position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--text-muted); pointer-events: none;"></i>
+              <input type="text" id="search-pantauan-guruwali" class="form-control" placeholder="Cari nama siswa asuhan..." style="padding-left: 36px; padding-top: 6px; padding-bottom: 6px; font-size: 0.85rem;" oninput="filterPantauanAbsensiGuruWali(this.value)">
+            </div>
+          </div>
+          <span class="badge badge-hadir">${asuhanList.length} Siswa Asuhan</span>
+        </div>
       </div>
 
       <div class="table-responsive" style="margin-top: 14px;">
-        <table class="table" style="width: 100%;">
+        <table id="table-pantauan-guruwali" class="table" style="width: 100%;">
           <thead>
             <tr>
               <th style="width: 40px; text-align: center;">No</th>
@@ -15222,6 +15661,13 @@ function renderPantauanAbsensiGuruWali(container) {
       </div>
     </div>
   `;
+}
+
+function filterPantauanAbsensiGuruWali(query) {
+  const q = (query || "").toLowerCase().trim();
+  document.querySelectorAll("#table-pantauan-guruwali tbody tr").forEach(row => {
+    row.style.display = (!q || row.textContent.toLowerCase().includes(q)) ? "" : "none";
+  });
 }
 
 function sendDirectWA(phone, text) {
@@ -17780,17 +18226,25 @@ function renderRekapLaporanBK(container) {
 
     <!-- Printable Official Sheet Container -->
     <div class="card">
-      <div class="card-header">
-        <h3 style="margin: 0; font-size: 1.05rem;">
-          <i class="fas fa-file-contract"></i> Laporan Pelaksanaan Layanan Bimbingan & Konseling
-        </h3>
-        <p style="margin: 4px 0 0; font-size: 0.8rem; color: var(--text-muted);">
-          Periode: ${bulanNames[currentBKMonth]} ${currentBKYear}
-        </p>
+      <div class="card-header" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+        <div>
+          <h3 style="margin: 0; font-size: 1.05rem;">
+            <i class="fas fa-file-contract"></i> Laporan Pelaksanaan Layanan Bimbingan & Konseling
+          </h3>
+          <p style="margin: 4px 0 0; font-size: 0.8rem; color: var(--text-muted);">
+            Periode: ${bulanNames[currentBKMonth]} ${currentBKYear}
+          </p>
+        </div>
+        <div style="min-width: 220px; max-width: 320px;">
+          <div style="position: relative;">
+            <i class="fas fa-search" style="position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--text-muted); pointer-events: none;"></i>
+            <input type="text" id="search-rekap-bk" class="form-control" placeholder="Cari nama atau NISN..." style="padding-left: 36px; padding-top: 6px; padding-bottom: 6px; font-size: 0.85rem;" oninput="filterRekapLaporanBKRows(this.value)">
+          </div>
+        </div>
       </div>
 
       <div class="table-responsive" style="margin-top: 14px;">
-        <table class="table" style="width: 100%;">
+        <table id="table-rekap-bk" class="table" style="width: 100%;">
           <thead>
             <tr>
               <th style="width: 35px; text-align: center;">No</th>
@@ -17838,6 +18292,13 @@ function renderRekapLaporanBK(container) {
       </div>
     </div>
   `;
+}
+
+function filterRekapLaporanBKRows(query) {
+  const q = (query || "").toLowerCase().trim();
+  document.querySelectorAll("#table-rekap-bk tbody tr").forEach(row => {
+    row.style.display = (!q || row.textContent.toLowerCase().includes(q)) ? "" : "none";
+  });
 }
 
 function printLaporanResmiBK() {

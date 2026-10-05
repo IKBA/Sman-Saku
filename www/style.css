@@ -2858,6 +2858,42 @@ html.android-device * {
   transform: translateY(-1px);
 }
 
+/* Cross-mode Follow-up Badges & Alerts */
+.tl-cross-mode-notice {
+  margin-top: 8px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 0.82rem;
+  line-height: 1.4;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.badge-mode-walikelas {
+  background: rgba(16, 185, 129, 0.15) !important;
+  color: #10b981 !important;
+  border: 1px solid #10b981 !important;
+}
+
+.badge-mode-gurubk {
+  background: rgba(234, 88, 12, 0.15) !important;
+  color: #ea580c !important;
+  border: 1px solid #ea580c !important;
+}
+
+.badge-mode-guruwali {
+  background: rgba(124, 58, 237, 0.15) !important;
+  color: #7c3aed !important;
+  border: 1px solid #7c3aed !important;
+}
+
+.badge-mode-mapel {
+  background: rgba(37, 99, 235, 0.15) !important;
+  color: #2563eb !important;
+  border: 1px solid #2563eb !important;
+}
+
 @media (max-width: 768px) {
   .tl-item {
     flex-direction: column;
