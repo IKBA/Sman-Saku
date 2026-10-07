@@ -749,7 +749,8 @@ async function getRegisteredUsers() {
     { email: "admin@smansaku.id", password: "admin123", nama: "Administrator Sman_Saku", role: "admin" },
     { email: "kamria@smansaku.id", password: "@kamria123", nama: "Dr. Kamria, S.Pd., M.Si", role: "admin" },
     { email: "ikbar@smansaku.id", password: "r@bk10812", nama: "Muh. Ikbar, S.Pd., Gr", role: "guru_bk" },
-    { email: "piket@smansaku.id", password: "piket123", nama: "Guru Piket Sekolah, S.Pd.", role: "guru_piket" },
+    { email: "piket@smansaku.id", password: "piket123", nama: "Guru Piket Senin, S.Pd.", role: "guru_piket", hariPiket: "Senin" },
+    { email: "piket.selasa@smansaku.id", password: "piket123", nama: "Guru Piket Selasa, S.Pd.", role: "guru_piket", hariPiket: "Selasa" },
     { email: "guru@smansaku.id", password: "guru123", nama: "Guru Mata Pelajaran, S.Pd.", role: "guru" }
   ];
 
@@ -768,7 +769,17 @@ async function getRegisteredUsers() {
 
   const piketUser = users.find(u => u.email.toLowerCase() === "piket@smansaku.id");
   if (!piketUser) {
-    users.push({ email: "piket@smansaku.id", password: "piket123", nama: "Guru Piket Sekolah, S.Pd.", role: "guru_piket" });
+    users.push({ email: "piket@smansaku.id", password: "piket123", nama: "Guru Piket Senin, S.Pd.", role: "guru_piket", hariPiket: "Senin" });
+    changed = true;
+  } else if (!piketUser.hariPiket) {
+    piketUser.hariPiket = "Senin";
+    piketUser.nama = "Guru Piket Senin, S.Pd.";
+    changed = true;
+  }
+
+  const piketSelasaUser = users.find(u => u.email.toLowerCase() === "piket.selasa@smansaku.id");
+  if (!piketSelasaUser) {
+    users.push({ email: "piket.selasa@smansaku.id", password: "piket123", nama: "Guru Piket Selasa, S.Pd.", role: "guru_piket", hariPiket: "Selasa" });
     changed = true;
   }
 
@@ -929,7 +940,33 @@ function setSession(user) {
   if (user.kelasWaliId) {
     sessionObj.kelasWaliId = user.kelasWaliId;
   }
+  if (user.hariPiket) {
+    sessionObj.hariPiket = user.hariPiket;
+  }
   localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(sessionObj));
+}
+
+function getAssignedHariPiket(session = null) {
+  if (!session) session = getSession();
+  if (!session) return "";
+
+  if (session.hariPiket) return session.hariPiket;
+
+  try {
+    const users = JSON.parse(localStorage.getItem(USERS_STORAGE_KEY) || "[]");
+    const found = users.find(u => u.email && u.email.toLowerCase() === session.email.toLowerCase());
+    if (found && found.hariPiket) return found.hariPiket;
+  } catch(e) {}
+
+  const emailLower = (session.email || "").toLowerCase();
+  if (emailLower.includes("senin") || emailLower === "piket@smansaku.id") return "Senin";
+  if (emailLower.includes("selasa")) return "Selasa";
+  if (emailLower.includes("rabu")) return "Rabu";
+  if (emailLower.includes("kamis")) return "Kamis";
+  if (emailLower.includes("jumat")) return "Jumat";
+  if (emailLower.includes("sabtu")) return "Sabtu";
+
+  return "";
 }
 
 function clearSession() {
@@ -996,6 +1033,15 @@ async function handleLogin(event) {
       }
     } catch(err) {
       console.warn("Wali assignment detection error during login:", err);
+    }
+
+    if (!matchedUser.hariPiket) {
+      if (email.includes("senin") || email === "piket@smansaku.id") matchedUser.hariPiket = "Senin";
+      else if (email.includes("selasa")) matchedUser.hariPiket = "Selasa";
+      else if (email.includes("rabu")) matchedUser.hariPiket = "Rabu";
+      else if (email.includes("kamis")) matchedUser.hariPiket = "Kamis";
+      else if (email.includes("jumat")) matchedUser.hariPiket = "Jumat";
+      else if (email.includes("sabtu")) matchedUser.hariPiket = "Sabtu";
     }
 
     setSession(matchedUser);
@@ -3098,8 +3144,19 @@ function renderPage(pageId) {
         subtitleEl.textContent = `Laporan hari ini (${formatDateIndo(todayStr)}), pemantauan kasus siswa, dan layanan bimbingan konseling.`;
         renderDashboardGuruBK(container);
       } else if (currentAppMode === "gurupiket") {
-        titleEl.textContent = "Dashboard Guru Piket";
-        subtitleEl.textContent = `Laporan presensi seluruh kelas hari ini (${formatDateIndo(todayStr)}), rekap kehadiran, dan catatan kejadian piket.`;
+        const session = getSession();
+        const isAdmin = session && session.role === "admin";
+        const assignedHari = !isAdmin ? getAssignedHariPiket(session) : (window.adminPiketDayFilter || "");
+        if (assignedHari) {
+          if (getDayNameFromDate(currentPiketDate) !== assignedHari) {
+            currentPiketDate = getNearestDateForDayName(assignedHari);
+          }
+          titleEl.textContent = `Dashboard Guru Piket (Hari ${assignedHari})`;
+          subtitleEl.textContent = `Laporan presensi seluruh kelas khusus hari ${assignedHari} (${formatDateIndo(currentPiketDate)}), radar ketidakhadiran, dan catatan kejadian piket.`;
+        } else {
+          titleEl.textContent = "Dashboard Guru Piket";
+          subtitleEl.textContent = `Laporan presensi seluruh kelas (${formatDateIndo(currentPiketDate)}), rekap kehadiran, dan catatan kejadian piket.`;
+        }
         renderDashboardGuruPiket(container);
       } else {
         titleEl.textContent = "Dashboard";
@@ -3138,21 +3195,48 @@ function renderPage(pageId) {
       subtitleEl.textContent = "Laporan berkala pelaksanaan bimbingan konseling dan format cetak administrasi BK.";
       renderRekapLaporanBK(container);
       break;
-    case "rekap_kelas_piket":
-      titleEl.textContent = "Rekap Kehadiran Seluruh Kelas";
-      subtitleEl.textContent = "Tinjauan kehadiran dan persentase kehadiran per rombel kelas pada hari tugas piket.";
+    case "rekap_kelas_piket": {
+      const session = getSession();
+      const isAdmin = session && session.role === "admin";
+      const assignedHari = !isAdmin ? getAssignedHariPiket(session) : (window.adminPiketDayFilter || "");
+      if (assignedHari && getDayNameFromDate(currentPiketDate) !== assignedHari) {
+        currentPiketDate = getNearestDateForDayName(assignedHari);
+      }
+      titleEl.textContent = assignedHari ? `Rekap Kehadiran Seluruh Kelas (Hari ${assignedHari})` : "Rekap Kehadiran Seluruh Kelas";
+      subtitleEl.textContent = assignedHari 
+        ? `Tinjauan kehadiran per rombel kelas khusus hari ${assignedHari} (${formatDateIndo(currentPiketDate)}).`
+        : "Tinjauan kehadiran dan persentase kehadiran per rombel kelas pada hari tugas piket.";
       renderRekapKelasPiket(container);
       break;
-    case "radar_piket":
-      titleEl.textContent = "Radar Siswa Tidak Hadir & Terlambat";
-      subtitleEl.textContent = "Daftar siswa yang tidak hadir atau terlambat di seluruh sekolah untuk tindak lanjut piket.";
+    }
+    case "radar_piket": {
+      const session = getSession();
+      const isAdmin = session && session.role === "admin";
+      const assignedHari = !isAdmin ? getAssignedHariPiket(session) : (window.adminPiketDayFilter || "");
+      if (assignedHari && getDayNameFromDate(currentPiketDate) !== assignedHari) {
+        currentPiketDate = getNearestDateForDayName(assignedHari);
+      }
+      titleEl.textContent = assignedHari ? `Radar Siswa Tidak Hadir & Terlambat (Hari ${assignedHari})` : "Radar Siswa Tidak Hadir & Terlambat";
+      subtitleEl.textContent = assignedHari
+        ? `Daftar siswa yang tidak hadir atau terlambat khusus hari ${assignedHari} (${formatDateIndo(currentPiketDate)}).`
+        : "Daftar siswa yang tidak hadir atau terlambat di seluruh sekolah untuk tindak lanjut piket.";
       renderRadarPiket(container);
       break;
-    case "jurnal_piket":
-      titleEl.textContent = "Buku Catatan Kejadian / Jurnal Piket";
-      subtitleEl.textContent = "Pencatatan kejadian khusus, siswa terlambat, izin keluar, dan laporan piket harian.";
+    }
+    case "jurnal_piket": {
+      const session = getSession();
+      const isAdmin = session && session.role === "admin";
+      const assignedHari = !isAdmin ? getAssignedHariPiket(session) : (window.adminPiketDayFilter || "");
+      if (assignedHari && getDayNameFromDate(currentPiketDate) !== assignedHari) {
+        currentPiketDate = getNearestDateForDayName(assignedHari);
+      }
+      titleEl.textContent = assignedHari ? `Buku Jurnal Piket (Hari ${assignedHari})` : "Buku Catatan Kejadian / Jurnal Piket";
+      subtitleEl.textContent = assignedHari
+        ? `Pencatatan kejadian khusus, siswa terlambat, dan izin keluar khusus hari ${assignedHari} (${formatDateIndo(currentPiketDate)}).`
+        : "Pencatatan kejadian khusus, siswa terlambat, izin keluar, dan laporan piket harian.";
       renderJurnalPiket(container);
       break;
+    }
     case "rekap_final":
       titleEl.textContent = "Rekap Presensi Final Kelas";
       subtitleEl.textContent = "Rekapan presensi gabungan dari seluruh guru mata pelajaran.";
@@ -12812,7 +12896,7 @@ function renderManajemenAkun(container) {
                 <th>Nama Lengkap</th>
                 <th>Email & Password</th>
                 <th>Peran (Role)</th>
-                <th>Penugasan Wali Kelas</th>
+                <th>Penugasan Wali & Hari Piket</th>
                 <th class="actions-cell">Aksi</th>
               </tr>
             </thead>
@@ -13233,12 +13317,15 @@ async function loadUsersTable() {
       } else if (u.role === "guru_bk") {
         roleBadge = "badge-bk-role";
         roleText = "Guru BK";
+      } else if (u.role === "guru_piket") {
+        roleBadge = "badge-terlambat";
+        roleText = "Guru Piket";
       }
 
-      // Penugasan Wali Kelas
-      let waliKelasStatusHtml = "";
+      // Penugasan Wali Kelas & Hari Piket
+      let penugasanHtml = "";
       if (u.role === "admin") {
-        waliKelasStatusHtml = `<span class="badge" style="background:rgba(59,130,246,0.12); color:#2563eb; border:1px solid rgba(59,130,246,0.25);"><i class="fas fa-shield-alt"></i> Supervisi Semua Kelas</span>`;
+        penugasanHtml = `<span class="badge" style="background:rgba(59,130,246,0.12); color:#2563eb; border:1px solid rgba(59,130,246,0.25);"><i class="fas fa-shield-alt"></i> Supervisi Semua Kelas & Piket</span>`;
       } else {
         const assigned = (db.kelas || []).find(k => {
           if (k.waliKelasEmail && k.waliKelasEmail.toLowerCase() === targetEmail) return true;
@@ -13246,9 +13333,14 @@ async function loadUsersTable() {
           return false;
         });
         if (assigned) {
-          waliKelasStatusHtml = `<span class="badge" style="background:rgba(16,185,129,0.15); color:#059669; border:1px solid rgba(16,185,129,0.3); font-weight:600;"><i class="fas fa-chalkboard-teacher"></i> Kelas ${escapeHtml(assigned.nama)}</span>`;
-        } else {
-          waliKelasStatusHtml = `<span style="font-size:0.78rem; color:var(--text-muted);"><i class="fas fa-minus-circle"></i> Bukan Wali Kelas</span>`;
+          penugasanHtml += `<span class="badge" style="background:rgba(16,185,129,0.15); color:#059669; border:1px solid rgba(16,185,129,0.3); font-weight:600;"><i class="fas fa-chalkboard-teacher"></i> Kelas ${escapeHtml(assigned.nama)}</span>`;
+        }
+        if (u.hariPiket) {
+          if (penugasanHtml) penugasanHtml += "<br>";
+          penugasanHtml += `<span class="badge" style="background:rgba(14,165,233,0.15); color:#0284c7; border:1px solid rgba(14,165,233,0.3); font-weight:600; margin-top:2px;"><i class="fas fa-calendar-day"></i> Piket Hari ${escapeHtml(u.hariPiket)}</span>`;
+        }
+        if (!penugasanHtml) {
+          penugasanHtml = `<span style="font-size:0.78rem; color:var(--text-muted);"><i class="fas fa-minus-circle"></i> Tidak Ada Penugasan Khusus</span>`;
         }
       }
       
@@ -13286,7 +13378,7 @@ async function loadUsersTable() {
           <td><strong>${escapeHtml(u.nama || '-')}</strong>${primaryBadge}</td>
           <td><code>${escapeHtml(u.email)}</code><br><span style="font-size:0.75rem; color:var(--text-muted);">Password: ${passwordDisplay}</span></td>
           <td><span class="badge ${roleBadge}">${roleText}</span></td>
-          <td>${waliKelasStatusHtml}</td>
+          <td>${penugasanHtml}</td>
           ${actionsHtml}
         </tr>
       `;
@@ -13320,10 +13412,26 @@ function showAddUserModal() {
       <label class="form-label" for="user-role">Peran (Role)</label>
       <select id="user-role" class="form-control" required>
         <option value="guru" selected>Guru Mata Pelajaran</option>
+        <option value="guru_piket">Guru Piket Sekolah</option>
         <option value="guru_bk">Guru BK (Bimbingan Konseling)</option>
         <option value="admin">Administrator</option>
       </select>
-      <small style="color:var(--text-muted); font-size:0.75rem; display:block; margin-top:4px;"><i class="fas fa-info-circle"></i> Tentukan hak akses akun: Guru Mapel, Guru BK, atau Administrator.</small>
+      <small style="color:var(--text-muted); font-size:0.75rem; display:block; margin-top:4px;"><i class="fas fa-info-circle"></i> Tentukan hak akses akun: Guru Mapel, Guru Piket, Guru BK, atau Administrator.</small>
+    </div>
+    <div class="form-group" id="group-add-user-hari-piket">
+      <label class="form-label" for="user-hari-piket">Penugasan Hari Guru Piket</label>
+      <select id="user-hari-piket" class="form-control">
+        <option value="">— Bukan Guru Piket / Semua Hari —</option>
+        <option value="Senin">Hari Senin (Laporan Khusus Hari Senin)</option>
+        <option value="Selasa">Hari Selasa (Laporan Khusus Hari Selasa)</option>
+        <option value="Rabu">Hari Rabu (Laporan Khusus Hari Rabu)</option>
+        <option value="Kamis">Hari Kamis (Laporan Khusus Hari Kamis)</option>
+        <option value="Jumat">Hari Jumat (Laporan Khusus Hari Jumat)</option>
+        <option value="Sabtu">Hari Sabtu (Laporan Khusus Hari Sabtu)</option>
+      </select>
+      <small style="color:var(--text-muted); font-size:0.75rem; display:block; margin-top:4px;">
+        <i class="fas fa-info-circle"></i> Jika akun piket ditetapkan hari tugas (misal: Hari Senin), laporan kehadiran seluruh kelas yang tampil hanya khusus hari Senin.
+      </small>
     </div>
     <div class="form-group" id="group-add-user-kelas-wali">
       <label class="form-label" for="user-kelas-wali">Penugasan Wali Kelas</label>
@@ -13356,6 +13464,7 @@ async function submitAddUser() {
   const password = document.getElementById("user-password").value.trim();
   const role = document.getElementById("user-role").value;
   const kelasWaliId = document.getElementById("user-kelas-wali") ? document.getElementById("user-kelas-wali").value : "";
+  const hariPiket = document.getElementById("user-hari-piket") ? document.getElementById("user-hari-piket").value : "";
 
   const session = getSession();
   const currentEmail = session ? session.email.toLowerCase() : "";
@@ -13393,7 +13502,7 @@ async function submitAddUser() {
     }
   }
 
-  users.push({ email, nama, password, role, kelasWaliId });
+  users.push({ email, nama, password, role, kelasWaliId, hariPiket });
   await saveRegisteredUsers(users);
 
   // Jika ditugaskan sebagai wali kelas, sinkronkan ke db.kelas
@@ -13463,11 +13572,27 @@ async function showEditUserModal(email) {
       <label class="form-label" for="edit-user-role">Peran (Role)</label>
       <select id="edit-user-role" class="form-control" required>
         <option value="guru" ${user.role === 'guru' ? 'selected' : ''}>Guru Mata Pelajaran</option>
+        <option value="guru_piket" ${user.role === 'guru_piket' ? 'selected' : ''}>Guru Piket Sekolah</option>
         <option value="guru_bk" ${user.role === 'guru_bk' ? 'selected' : ''}>Guru BK (Bimbingan Konseling)</option>
         <option value="admin" ${user.role === 'admin' ? 'selected' : ''}>Administrator</option>
       </select>
       <small style="color:var(--text-muted); font-size:0.75rem; display:block; margin-top:4px;">
-        <i class="fas fa-info-circle"></i> Tentukan hak akses akun: Guru Mapel, Guru BK, atau Administrator.
+        <i class="fas fa-info-circle"></i> Tentukan hak akses akun: Guru Mapel, Guru Piket, Guru BK, atau Administrator.
+      </small>
+    </div>
+    <div class="form-group" id="group-edit-user-hari-piket">
+      <label class="form-label" for="edit-user-hari-piket">Penugasan Hari Guru Piket</label>
+      <select id="edit-user-hari-piket" class="form-control">
+        <option value="">— Bukan Guru Piket / Semua Hari —</option>
+        <option value="Senin" ${user.hariPiket === 'Senin' ? 'selected' : ''}>Hari Senin (Laporan Khusus Hari Senin)</option>
+        <option value="Selasa" ${user.hariPiket === 'Selasa' ? 'selected' : ''}>Hari Selasa (Laporan Khusus Hari Selasa)</option>
+        <option value="Rabu" ${user.hariPiket === 'Rabu' ? 'selected' : ''}>Hari Rabu (Laporan Khusus Hari Rabu)</option>
+        <option value="Kamis" ${user.hariPiket === 'Kamis' ? 'selected' : ''}>Hari Kamis (Laporan Khusus Hari Kamis)</option>
+        <option value="Jumat" ${user.hariPiket === 'Jumat' ? 'selected' : ''}>Hari Jumat (Laporan Khusus Hari Jumat)</option>
+        <option value="Sabtu" ${user.hariPiket === 'Sabtu' ? 'selected' : ''}>Hari Sabtu (Laporan Khusus Hari Sabtu)</option>
+      </select>
+      <small style="color:var(--text-muted); font-size:0.75rem; display:block; margin-top:4px;">
+        <i class="fas fa-info-circle"></i> Jika akun piket ditetapkan hari tugas (misal: Hari Senin), laporan kehadiran seluruh kelas yang tampil hanya khusus hari Senin.
       </small>
     </div>
     <div class="form-group" id="group-edit-user-kelas-wali">
@@ -13503,6 +13628,7 @@ async function submitEditUser() {
   const roleInput = document.getElementById("edit-user-role");
   let role = roleInput ? roleInput.value : "guru";
   const kelasWaliId = document.getElementById("edit-user-kelas-wali") ? document.getElementById("edit-user-kelas-wali").value : "";
+  const hariPiket = document.getElementById("edit-user-hari-piket") ? document.getElementById("edit-user-hari-piket").value : "";
 
   const session = getSession();
   const currentEmail = session ? session.email.toLowerCase() : "";
@@ -13606,7 +13732,7 @@ async function submitEditUser() {
   await distributeMasterClassesToAllTeachers(db.kelas, db.siswa);
 
   // Perbarui objek di array users
-  users[userIdx] = { ...users[userIdx], email, nama, password: finalPassword, role, kelasWaliId };
+  users[userIdx] = { ...users[userIdx], email, nama, password: finalPassword, role, kelasWaliId, hariPiket };
   await saveRegisteredUsers(users);
 
   // If the edited user is the current session user, update session
@@ -13615,6 +13741,7 @@ async function submitEditUser() {
     session.nama = nama;
     session.role = role;
     session.kelasWaliId = kelasWaliId;
+    session.hariPiket = hariPiket;
     setSession(session);
     updateHeaderProfile();
     initAppMode();
@@ -14119,6 +14246,10 @@ function initAppMode() {
           createdAt: new Date().toISOString()
         }
       ];
+    }
+
+    if (typeof seedSamplePiketAttendanceForMonday === "function") {
+      seedSamplePiketAttendanceForMonday();
     }
   }
 
@@ -20611,17 +20742,158 @@ ${userSchool}`;
 }
 
 // ============================================================================
-// MODE GURU PIKET IMPLEMENTATION
+// MODE GURU PIKET IMPLEMENTATION (KHUSUS HARI PENUGASAN PIKET)
 // ============================================================================
+
+const HARI_NAMES = ["Minggu", "Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu"];
+
+function getDayNameFromDate(dateStr) {
+  if (!dateStr) return "";
+  const parts = dateStr.split("-").map(Number);
+  if (parts.length !== 3) return "";
+  const d = new Date(parts[0], parts[1] - 1, parts[2]);
+  return HARI_NAMES[d.getDay()] || "";
+}
+
+function getNearestDateForDayName(dayName, baseDateStr = getLocalDateString()) {
+  const targetDayIdx = HARI_NAMES.indexOf(dayName);
+  if (targetDayIdx === -1) return baseDateStr;
+
+  const parts = baseDateStr.split("-").map(Number);
+  const base = new Date(parts[0], parts[1] - 1, parts[2]);
+  const currentDayIdx = base.getDay();
+
+  if (currentDayIdx === targetDayIdx) return baseDateStr;
+
+  let diff = targetDayIdx - currentDayIdx;
+  if (diff > 0) diff -= 7; // Ambil hari yang paling baru berlalu
+
+  const targetDate = new Date(base);
+  targetDate.setDate(base.getDate() + diff);
+
+  const y = targetDate.getFullYear();
+  const m = String(targetDate.getMonth() + 1).padStart(2, "0");
+  const d = String(targetDate.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+function getAvailableDatesForDay(dayName, count = 8) {
+  const targetDayIdx = HARI_NAMES.indexOf(dayName);
+  const dates = new Set();
+
+  (db.absensi || []).forEach(a => {
+    if (a.tanggal && getDayNameFromDate(a.tanggal) === dayName) {
+      dates.add(a.tanggal);
+    }
+  });
+
+  (db.jurnalPiket || []).forEach(j => {
+    if (j.tanggal && getDayNameFromDate(j.tanggal) === dayName) {
+      dates.add(j.tanggal);
+    }
+  });
+
+  const today = new Date();
+  if (targetDayIdx !== -1) {
+    const todayDayIdx = today.getDay();
+    let diff = targetDayIdx - todayDayIdx;
+    if (diff > 0) diff -= 7;
+
+    for (let i = 0; i < count; i++) {
+      const d = new Date(today);
+      d.setDate(today.getDate() + diff - (i * 7));
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, "0");
+      const day = String(d.getDate()).padStart(2, "0");
+      dates.add(`${y}-${m}-${day}`);
+    }
+  }
+
+  return Array.from(dates).sort((a, b) => b.localeCompare(a));
+}
+
+function seedSamplePiketAttendanceForMonday() {
+  if (!db || !Array.isArray(db.kelas) || db.kelas.length === 0) return;
+  if (!Array.isArray(db.siswa) || db.siswa.length === 0) return;
+
+  const mondayDate = getNearestDateForDayName("Senin");
+  db.absensi = db.absensi || [];
+  const existingMondayRecords = db.absensi.filter(a => a.tanggal === mondayDate);
+  if (existingMondayRecords.length > 0) return;
+
+  const mapelSenin = "Upacara & Jam Ke-1";
+
+  db.kelas.forEach((k, kIdx) => {
+    const students = db.siswa.filter(s => s.kelasId === k.id);
+    students.forEach((s, sIdx) => {
+      let status = "Hadir";
+      if (kIdx === 0 && sIdx === 1) status = "Terlambat";
+      else if (kIdx === 0 && sIdx === 3) status = "Sakit";
+      else if (kIdx === 1 && sIdx === 2) status = "Izin";
+      else if (kIdx === 1 && sIdx === 5) status = "Alpa";
+      else if (kIdx === 2 && sIdx === 0) status = "Terlambat";
+      else if (kIdx === 2 && sIdx === 4) status = "Sakit";
+      else if (kIdx === 3 && sIdx === 2) status = "Alpa";
+
+      db.absensi.push({
+        id: "a-senin-" + k.id + "-" + s.id,
+        tanggal: mondayDate,
+        kelasId: k.id,
+        siswaId: s.id,
+        mapel: mapelSenin,
+        status: status,
+        guruNama: "Guru Piket Senin, S.Pd.",
+        guruEmail: "piket@smansaku.id"
+      });
+    });
+  });
+
+  db.jurnalPiket = db.jurnalPiket || [];
+  const hasMondayIncident = db.jurnalPiket.some(j => j.tanggal === mondayDate);
+  if (!hasMondayIncident) {
+    db.jurnalPiket.unshift({
+      id: "piket-senin-sample",
+      tanggal: mondayDate,
+      waktu: "07:15",
+      tipe: "Keterlambatan Gerbang",
+      judul: "Penertiban Siswa Terlambat Masuk Upacara Bendera",
+      siswaInfo: "3 Siswa Rombel X & XI",
+      uraian: "Pencatatan 3 siswa yang tiba di gerbang sekolah setelah bel berbunyi karena kendala rantai motor dan cuaca mendung.",
+      tindakLanjut: "Diberikan pengarahan kedisiplinan dan baris terpisah di samping lapangan upacara, lalu diantar masuk ke kelas.",
+      petugas: "Guru Piket Senin, S.Pd.",
+      status: "Selesai",
+      createdAt: new Date().toISOString()
+    });
+  }
+
+  saveDatabase(false);
+}
 
 let currentPiketDate = getLocalDateString();
 let currentPiketTingkatFilter = "all";
 let currentPiketSortBy = "persen_asc";
 let currentPiketRadarTab = "all";
+window.adminPiketDayFilter = "";
 
-function changePiketDate(dateVal) {
-  if (!dateVal) return;
-  currentPiketDate = dateVal;
+function stepPiketWeek(offset) {
+  const parts = currentPiketDate.split("-").map(Number);
+  const d = new Date(parts[0], parts[1] - 1, parts[2]);
+  d.setDate(d.getDate() + (offset * 7));
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  changePiketDate(`${y}-${m}-${day}`);
+}
+
+function setAdminPiketDayFilter(dayName) {
+  window.adminPiketDayFilter = dayName;
+  if (dayName) {
+    currentPiketDate = getNearestDateForDayName(dayName);
+    showToast(`Filter Administrator: Beralih ke Laporan Guru Piket Hari ${dayName}`);
+  } else {
+    currentPiketDate = getLocalDateString();
+    showToast("Filter Administrator: Mode Bebas / Semua Hari");
+  }
   const activeNav = document.querySelector(".sidebar-menu li.active");
   const activePage = activeNav ? activeNav.getAttribute("data-page") : "dashboard";
   if (typeof renderPage === "function" && activePage) {
@@ -20629,6 +20901,97 @@ function changePiketDate(dateVal) {
   } else {
     navigate("dashboard");
   }
+}
+
+function changePiketDate(dateVal) {
+  if (!dateVal) return;
+  const session = getSession();
+  const isAdmin = session && session.role === "admin";
+  const assignedHari = !isAdmin ? getAssignedHariPiket(session) : (window.adminPiketDayFilter || "");
+
+  if (assignedHari) {
+    const selectedDayName = getDayNameFromDate(dateVal);
+    if (selectedDayName !== assignedHari) {
+      const snappedDate = getNearestDateForDayName(assignedHari, dateVal);
+      currentPiketDate = snappedDate;
+      showToast(`Akun piket bertugas khusus hari ${assignedHari}. Tanggal disesuaikan ke ${formatDateIndo(snappedDate)} (${assignedHari}).`);
+    } else {
+      currentPiketDate = dateVal;
+    }
+  } else {
+    currentPiketDate = dateVal;
+  }
+
+  const activeNav = document.querySelector(".sidebar-menu li.active");
+  const activePage = activeNav ? activeNav.getAttribute("data-page") : "dashboard";
+  if (typeof renderPage === "function" && activePage) {
+    renderPage(activePage);
+  } else {
+    navigate("dashboard");
+  }
+}
+
+function getPiketDateToolbarControlsHtml() {
+  const session = getSession();
+  const isAdmin = session && session.role === "admin";
+  const assignedHari = !isAdmin ? getAssignedHariPiket(session) : (window.adminPiketDayFilter || "");
+  const todayStr = getLocalDateString();
+  const isToday = currentPiketDate === todayStr;
+
+  if (assignedHari) {
+    const availableDayDates = getAvailableDatesForDay(assignedHari);
+    return `
+      <div style="display: flex; align-items: center; gap: 6px; background: rgba(14,165,233,0.08); padding: 4px 8px; border-radius: 8px; border: 1px solid rgba(14,165,233,0.25);">
+        <label style="font-size: 0.78rem; font-weight: 700; margin: 0; color: #0284c7;">
+          <i class="fas fa-calendar-day"></i> Hari ${assignedHari}:
+        </label>
+        <select class="form-control" style="font-size: 0.82rem; font-weight: 600; padding: 3px 6px; width: auto; max-width: 190px;" onchange="changePiketDate(this.value)">
+          ${availableDayDates.map(d => `<option value="${d}" ${d === currentPiketDate ? 'selected' : ''}>${formatDateIndoFull(d)}</option>`).join("")}
+        </select>
+        <div class="btn-group" style="display:flex; gap:2px;">
+          <button type="button" class="btn btn-secondary btn-sm" onclick="stepPiketWeek(-1)" title="Minggu Sebelumnya" style="padding: 2px 6px; font-size: 0.72rem;"><i class="fas fa-chevron-left"></i></button>
+          <button type="button" class="btn btn-secondary btn-sm" onclick="changePiketDate('${getNearestDateForDayName(assignedHari)}')" title="${assignedHari} Terkini" style="padding: 2px 6px; font-size: 0.72rem;">Terkini</button>
+          <button type="button" class="btn btn-secondary btn-sm" onclick="stepPiketWeek(1)" title="Minggu Berikutnya" style="padding: 2px 6px; font-size: 0.72rem;"><i class="fas fa-chevron-right"></i></button>
+        </div>
+      </div>
+    `;
+  } else {
+    return `
+      <div style="display: flex; align-items: center; gap: 6px; background: rgba(0,0,0,0.03); padding: 4px 8px; border-radius: 8px; border: 1px solid var(--border-color);">
+        <label for="piket-date-picker" style="font-size: 0.78rem; font-weight: 700; margin: 0; color: var(--text-secondary);">
+          <i class="fas fa-calendar-alt" style="color: #0284c7;"></i> Tanggal:
+        </label>
+        <input type="date" id="piket-date-picker" class="form-control" style="font-size: 0.85rem; padding: 4px 8px; width: 145px;" value="${currentPiketDate}" onchange="changePiketDate(this.value)">
+        ${!isToday ? `
+          <button type="button" class="btn btn-secondary btn-sm" onclick="changePiketDate('${todayStr}')" style="font-size: 0.75rem; padding: 4px 8px;">
+            Hari Ini
+          </button>
+        ` : `
+          <span class="badge badge-hadir" style="font-size: 0.72rem; padding: 4px 7px;">Hari Ini</span>
+        `}
+      </div>
+    `;
+  }
+}
+
+function getPiketAdminDayFilterHtml() {
+  const session = getSession();
+  const isAdmin = session && session.role === "admin";
+  if (!isAdmin) return "";
+  return `
+    <div style="display:flex; align-items:center; gap:8px; margin-top:10px; padding-top:8px; border-top:1px dashed var(--border-color); flex-wrap:wrap;">
+      <span style="font-size:0.78rem; font-weight:700; color:var(--text-muted);"><i class="fas fa-user-shield"></i> Filter Hari Admin:</span>
+      <div class="btn-group" style="display:flex; gap:3px;">
+        <button type="button" class="btn btn-sm ${!window.adminPiketDayFilter ? 'btn-primary' : 'btn-secondary'}" onclick="setAdminPiketDayFilter('')" style="padding:2px 7px; font-size:0.72rem;">Semua Hari</button>
+        <button type="button" class="btn btn-sm ${window.adminPiketDayFilter === 'Senin' ? 'btn-primary' : 'btn-secondary'}" onclick="setAdminPiketDayFilter('Senin')" style="padding:2px 7px; font-size:0.72rem;">Senin</button>
+        <button type="button" class="btn btn-sm ${window.adminPiketDayFilter === 'Selasa' ? 'btn-primary' : 'btn-secondary'}" onclick="setAdminPiketDayFilter('Selasa')" style="padding:2px 7px; font-size:0.72rem;">Selasa</button>
+        <button type="button" class="btn btn-sm ${window.adminPiketDayFilter === 'Rabu' ? 'btn-primary' : 'btn-secondary'}" onclick="setAdminPiketDayFilter('Rabu')" style="padding:2px 7px; font-size:0.72rem;">Rabu</button>
+        <button type="button" class="btn btn-sm ${window.adminPiketDayFilter === 'Kamis' ? 'btn-primary' : 'btn-secondary'}" onclick="setAdminPiketDayFilter('Kamis')" style="padding:2px 7px; font-size:0.72rem;">Kamis</button>
+        <button type="button" class="btn btn-sm ${window.adminPiketDayFilter === 'Jumat' ? 'btn-primary' : 'btn-secondary'}" onclick="setAdminPiketDayFilter('Jumat')" style="padding:2px 7px; font-size:0.72rem;">Jumat</button>
+        <button type="button" class="btn btn-sm ${window.adminPiketDayFilter === 'Sabtu' ? 'btn-primary' : 'btn-secondary'}" onclick="setAdminPiketDayFilter('Sabtu')" style="padding:2px 7px; font-size:0.72rem;">Sabtu</button>
+      </div>
+    </div>
+  `;
 }
 
 function getPiketAttendanceSummary(targetDate = currentPiketDate) {
@@ -20763,12 +21126,20 @@ function renderDashboardGuruPiket(container) {
   container = container || document.getElementById("content-container") || document.getElementById("content-area");
   if (!container) return;
 
+  const session = getSession();
+  const isAdmin = session && session.role === "admin";
+  const assignedHari = !isAdmin ? getAssignedHariPiket(session) : (window.adminPiketDayFilter || "");
+
+  if (assignedHari && getDayNameFromDate(currentPiketDate) !== assignedHari) {
+    currentPiketDate = getNearestDateForDayName(assignedHari);
+  }
+
   const summary = getPiketAttendanceSummary(currentPiketDate);
   const userSchool = getCurrentSchoolName();
-  const session = getSession();
   const teacherName = (session && session.nama) ? session.nama : ((db.guruProfile && db.guruProfile.nama) ? db.guruProfile.nama : "Guru Piket");
   const todayStr = getLocalDateString();
   const isToday = currentPiketDate === todayStr;
+  const availableDayDates = assignedHari ? getAvailableDatesForDay(assignedHari) : [];
 
   const dutyNotes = (db.jurnalPiket || []).filter(j => j.tanggal === currentPiketDate);
   dutyNotes.sort((a, b) => (b.waktu || "").localeCompare(a.waktu || ""));
@@ -20783,10 +21154,17 @@ function renderDashboardGuruPiket(container) {
               <i class="fas fa-clipboard-check"></i>
             </div>
             <div>
-              <h3 style="margin: 0; font-size: 1.15rem; font-weight: 700; color: var(--text-primary);">
-                Pemantauan Piket Harian Sekolah
-              </h3>
-              <div style="font-size: 0.82rem; color: var(--text-muted);">
+              <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                <h3 style="margin: 0; font-size: 1.15rem; font-weight: 700; color: var(--text-primary);">
+                  Pemantauan Piket Harian Sekolah
+                </h3>
+                ${assignedHari ? `
+                  <span class="badge" style="background: rgba(14,165,233,0.18); color: #0284c7; border: 1px solid rgba(14,165,233,0.4); font-weight: 700; font-size: 0.78rem; padding: 2px 8px;">
+                    <i class="fas fa-calendar-check"></i> Khusus Hari ${assignedHari.toUpperCase()}
+                  </span>
+                ` : ''}
+              </div>
+              <div style="font-size: 0.82rem; color: var(--text-muted); margin-top: 2px;">
                 Petugas Piket: <strong>${escapeHtml(teacherName)}</strong> &bull; ${escapeHtml(userSchool)}
               </div>
             </div>
@@ -20794,19 +21172,35 @@ function renderDashboardGuruPiket(container) {
         </div>
 
         <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
-          <div style="display: flex; align-items: center; gap: 6px; background: rgba(0,0,0,0.03); padding: 4px 8px; border-radius: 8px; border: 1px solid var(--border-color);">
-            <label for="piket-date-picker" style="font-size: 0.78rem; font-weight: 700; margin: 0; color: var(--text-secondary);">
-              <i class="fas fa-calendar-alt" style="color: #0284c7;"></i> Tanggal:
-            </label>
-            <input type="date" id="piket-date-picker" class="form-control" style="font-size: 0.85rem; padding: 4px 8px; width: 145px;" value="${currentPiketDate}" onchange="changePiketDate(this.value)">
-            ${!isToday ? `
-              <button type="button" class="btn btn-secondary btn-sm" onclick="changePiketDate('${todayStr}')" style="font-size: 0.75rem; padding: 4px 8px;">
-                Hari Ini
-              </button>
-            ` : `
-              <span class="badge badge-hadir" style="font-size: 0.72rem; padding: 4px 7px;">Hari Ini</span>
-            `}
-          </div>
+          ${assignedHari ? `
+            <div style="display: flex; align-items: center; gap: 6px; background: rgba(14,165,233,0.08); padding: 4px 8px; border-radius: 8px; border: 1px solid rgba(14,165,233,0.25);">
+              <label style="font-size: 0.78rem; font-weight: 700; margin: 0; color: #0284c7;">
+                <i class="fas fa-calendar-day"></i> Hari ${assignedHari}:
+              </label>
+              <select class="form-control" style="font-size: 0.82rem; font-weight: 600; padding: 3px 6px; width: auto; max-width: 190px;" onchange="changePiketDate(this.value)">
+                ${availableDayDates.map(d => `<option value="${d}" ${d === currentPiketDate ? 'selected' : ''}>${formatDateIndoFull(d)}</option>`).join("")}
+              </select>
+              <div class="btn-group" style="display:flex; gap:2px;">
+                <button type="button" class="btn btn-secondary btn-sm" onclick="stepPiketWeek(-1)" title="Minggu Sebelumnya" style="padding: 2px 6px; font-size: 0.72rem;"><i class="fas fa-chevron-left"></i></button>
+                <button type="button" class="btn btn-secondary btn-sm" onclick="changePiketDate('${getNearestDateForDayName(assignedHari)}')" title="${assignedHari} Terkini" style="padding: 2px 6px; font-size: 0.72rem;">Terkini</button>
+                <button type="button" class="btn btn-secondary btn-sm" onclick="stepPiketWeek(1)" title="Minggu Berikutnya" style="padding: 2px 6px; font-size: 0.72rem;"><i class="fas fa-chevron-right"></i></button>
+              </div>
+            </div>
+          ` : `
+            <div style="display: flex; align-items: center; gap: 6px; background: rgba(0,0,0,0.03); padding: 4px 8px; border-radius: 8px; border: 1px solid var(--border-color);">
+              <label for="piket-date-picker" style="font-size: 0.78rem; font-weight: 700; margin: 0; color: var(--text-secondary);">
+                <i class="fas fa-calendar-alt" style="color: #0284c7;"></i> Tanggal:
+              </label>
+              <input type="date" id="piket-date-picker" class="form-control" style="font-size: 0.85rem; padding: 4px 8px; width: 145px;" value="${currentPiketDate}" onchange="changePiketDate(this.value)">
+              ${!isToday ? `
+                <button type="button" class="btn btn-secondary btn-sm" onclick="changePiketDate('${todayStr}')" style="font-size: 0.75rem; padding: 4px 8px;">
+                  Hari Ini
+                </button>
+              ` : `
+                <span class="badge badge-hadir" style="font-size: 0.72rem; padding: 4px 7px;">Hari Ini</span>
+              `}
+            </div>
+          `}
 
           <div style="display: flex; gap: 6px; flex-wrap: wrap;">
             <button type="button" class="btn btn-secondary btn-sm" onclick="printLaporanPiketHarian()" title="Cetak Rekap Laporan Guru Piket">
@@ -20821,10 +21215,26 @@ function renderDashboardGuruPiket(container) {
           </div>
         </div>
       </div>
+
+      ${isAdmin ? `
+        <div style="display:flex; align-items:center; gap:8px; margin-top:10px; padding-top:8px; border-top:1px dashed var(--border-color); flex-wrap:wrap;">
+          <span style="font-size:0.78rem; font-weight:700; color:var(--text-muted);"><i class="fas fa-user-shield"></i> Filter Hari Admin:</span>
+          <div class="btn-group" style="display:flex; gap:3px;">
+            <button type="button" class="btn btn-sm ${!window.adminPiketDayFilter ? 'btn-primary' : 'btn-secondary'}" onclick="setAdminPiketDayFilter('')" style="padding:2px 7px; font-size:0.72rem;">Semua Hari</button>
+            <button type="button" class="btn btn-sm ${window.adminPiketDayFilter === 'Senin' ? 'btn-primary' : 'btn-secondary'}" onclick="setAdminPiketDayFilter('Senin')" style="padding:2px 7px; font-size:0.72rem;">Senin</button>
+            <button type="button" class="btn btn-sm ${window.adminPiketDayFilter === 'Selasa' ? 'btn-primary' : 'btn-secondary'}" onclick="setAdminPiketDayFilter('Selasa')" style="padding:2px 7px; font-size:0.72rem;">Selasa</button>
+            <button type="button" class="btn btn-sm ${window.adminPiketDayFilter === 'Rabu' ? 'btn-primary' : 'btn-secondary'}" onclick="setAdminPiketDayFilter('Rabu')" style="padding:2px 7px; font-size:0.72rem;">Rabu</button>
+            <button type="button" class="btn btn-sm ${window.adminPiketDayFilter === 'Kamis' ? 'btn-primary' : 'btn-secondary'}" onclick="setAdminPiketDayFilter('Kamis')" style="padding:2px 7px; font-size:0.72rem;">Kamis</button>
+            <button type="button" class="btn btn-sm ${window.adminPiketDayFilter === 'Jumat' ? 'btn-primary' : 'btn-secondary'}" onclick="setAdminPiketDayFilter('Jumat')" style="padding:2px 7px; font-size:0.72rem;">Jumat</button>
+            <button type="button" class="btn btn-sm ${window.adminPiketDayFilter === 'Sabtu' ? 'btn-primary' : 'btn-secondary'}" onclick="setAdminPiketDayFilter('Sabtu')" style="padding:2px 7px; font-size:0.72rem;">Sabtu</button>
+          </div>
+        </div>
+      ` : ''}
       
       <div style="margin-top: 10px; padding-top: 8px; border-top: 1px dashed var(--border-color); font-size: 0.82rem; color: var(--text-secondary); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
         <div>
           <i class="fas fa-calendar-day" style="color: #0284c7;"></i> <strong>${formatDateIndoFull(currentPiketDate)}</strong>
+          ${assignedHari ? ` <span style="color:#0284c7; font-weight:600;">(Laporan Khusus Hari ${assignedHari})</span>` : ''}
         </div>
         <div>
           Status: <strong>${summary.totalKelasTerabsen} dari ${summary.classesCount} Kelas Terabsen</strong>
@@ -21263,6 +21673,14 @@ function renderRekapKelasPiket(container) {
   container = container || document.getElementById("content-container") || document.getElementById("content-area");
   if (!container) return;
 
+  const session = getSession();
+  const isAdmin = session && session.role === "admin";
+  const assignedHari = !isAdmin ? getAssignedHariPiket(session) : (window.adminPiketDayFilter || "");
+
+  if (assignedHari && getDayNameFromDate(currentPiketDate) !== assignedHari) {
+    currentPiketDate = getNearestDateForDayName(assignedHari);
+  }
+
   const summary = getPiketAttendanceSummary(currentPiketDate);
   const todayStr = getLocalDateString();
   const isToday = currentPiketDate === todayStr;
@@ -21287,26 +21705,23 @@ function renderRekapKelasPiket(container) {
     <div class="card" style="margin-bottom: 20px; border-top: 4px solid #0284c7;">
       <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 14px;">
         <div>
-          <h3 style="margin: 0; font-size: 1.15rem; font-weight: 700; color: var(--text-primary);">
-            <i class="fas fa-clipboard-check" style="color: #0284c7;"></i> Tinjauan Presensi Seluruh Rombongan Belajar
-          </h3>
+          <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+            <h3 style="margin: 0; font-size: 1.15rem; font-weight: 700; color: var(--text-primary);">
+              <i class="fas fa-clipboard-check" style="color: #0284c7;"></i> Tinjauan Presensi Seluruh Rombongan Belajar
+            </h3>
+            ${assignedHari ? `
+              <span class="badge" style="background: rgba(14,165,233,0.18); color: #0284c7; border: 1px solid rgba(14,165,233,0.4); font-weight: 700; font-size: 0.78rem; padding: 2px 8px;">
+                <i class="fas fa-calendar-check"></i> Khusus Hari ${assignedHari.toUpperCase()}
+              </span>
+            ` : ''}
+          </div>
           <div style="font-size: 0.82rem; color: var(--text-muted); margin-top: 2px;">
             Hari & Tanggal: <strong>${formatDateIndoFull(currentPiketDate)}</strong> &bull; Rata-rata Sekolah: <strong>${summary.persenKehadiranSekolah}%</strong>
           </div>
         </div>
 
         <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
-          <div style="display: flex; align-items: center; gap: 6px; background: rgba(0,0,0,0.03); padding: 4px 8px; border-radius: 8px; border: 1px solid var(--border-color);">
-            <label for="rekap-piket-date" style="font-size: 0.78rem; font-weight: 700; margin: 0;">
-              Tanggal:
-            </label>
-            <input type="date" id="rekap-piket-date" class="form-control" style="font-size: 0.85rem; padding: 4px 8px; width: 145px;" value="${currentPiketDate}" onchange="changePiketDate(this.value)">
-            ${!isToday ? `
-              <button type="button" class="btn btn-secondary btn-sm" onclick="changePiketDate('${todayStr}')" style="font-size: 0.75rem; padding: 4px 8px;">
-                Hari Ini
-              </button>
-            ` : ''}
-          </div>
+          ${getPiketDateToolbarControlsHtml()}
 
           <button type="button" class="btn btn-secondary btn-sm" onclick="printLaporanPiketHarian()">
             <i class="fas fa-print"></i> Cetak Rekap
@@ -21316,6 +21731,8 @@ function renderRekapKelasPiket(container) {
           </button>
         </div>
       </div>
+
+      ${getPiketAdminDayFilterHtml()}
 
       <!-- Filters & Sorting -->
       <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-top: 14px; padding-top: 12px; border-top: 1px dashed var(--border-color);">
@@ -21441,6 +21858,14 @@ function renderRadarPiket(container) {
   container = container || document.getElementById("content-container") || document.getElementById("content-area");
   if (!container) return;
 
+  const session = getSession();
+  const isAdmin = session && session.role === "admin";
+  const assignedHari = !isAdmin ? getAssignedHariPiket(session) : (window.adminPiketDayFilter || "");
+
+  if (assignedHari && getDayNameFromDate(currentPiketDate) !== assignedHari) {
+    currentPiketDate = getNearestDateForDayName(assignedHari);
+  }
+
   const summary = getPiketAttendanceSummary(currentPiketDate);
   const todayStr = getLocalDateString();
   const isToday = currentPiketDate === todayStr;
@@ -21466,32 +21891,31 @@ function renderRadarPiket(container) {
     <div class="card" style="margin-bottom: 20px; border-top: 4px solid #ef4444;">
       <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 14px;">
         <div>
-          <h3 style="margin: 0; font-size: 1.15rem; font-weight: 700; color: var(--text-primary);">
-            <i class="fas fa-radar" style="color: #ef4444;"></i> Radar Ketidakhadiran & Keterlambatan Seluruh Siswa
-          </h3>
+          <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+            <h3 style="margin: 0; font-size: 1.15rem; font-weight: 700; color: var(--text-primary);">
+              <i class="fas fa-radar" style="color: #ef4444;"></i> Radar Ketidakhadiran & Keterlambatan Seluruh Siswa
+            </h3>
+            ${assignedHari ? `
+              <span class="badge" style="background: rgba(14,165,233,0.18); color: #0284c7; border: 1px solid rgba(14,165,233,0.4); font-weight: 700; font-size: 0.78rem; padding: 2px 8px;">
+                <i class="fas fa-calendar-check"></i> Khusus Hari ${assignedHari.toUpperCase()}
+              </span>
+            ` : ''}
+          </div>
           <div style="font-size: 0.82rem; color: var(--text-muted); margin-top: 2px;">
             Hari & Tanggal: <strong>${formatDateIndoFull(currentPiketDate)}</strong> &bull; Total Terdata: <strong>${summary.radarStudents.length} Siswa</strong>
           </div>
         </div>
 
         <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
-          <div style="display: flex; align-items: center; gap: 6px; background: rgba(0,0,0,0.03); padding: 4px 8px; border-radius: 8px; border: 1px solid var(--border-color);">
-            <label for="radar-piket-date" style="font-size: 0.78rem; font-weight: 700; margin: 0;">
-              Tanggal:
-            </label>
-            <input type="date" id="radar-piket-date" class="form-control" style="font-size: 0.85rem; padding: 4px 8px; width: 145px;" value="${currentPiketDate}" onchange="changePiketDate(this.value)">
-            ${!isToday ? `
-              <button type="button" class="btn btn-secondary btn-sm" onclick="changePiketDate('${todayStr}')" style="font-size: 0.75rem; padding: 4px 8px;">
-                Hari Ini
-              </button>
-            ` : ''}
-          </div>
+          ${getPiketDateToolbarControlsHtml()}
 
           <button type="button" class="btn btn-secondary btn-sm" onclick="printLaporanPiketHarian()">
             <i class="fas fa-print"></i> Cetak Laporan
           </button>
         </div>
       </div>
+
+      ${getPiketAdminDayFilterHtml()}
 
       <!-- Filter Tabs -->
       <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-top: 14px; padding-top: 12px; border-top: 1px dashed var(--border-color);">
@@ -21623,6 +22047,13 @@ function renderJurnalPiket(container) {
 
   const userSchool = getCurrentSchoolName();
   const session = getSession();
+  const isAdmin = session && session.role === "admin";
+  const assignedHari = !isAdmin ? getAssignedHariPiket(session) : (window.adminPiketDayFilter || "");
+
+  if (assignedHari && getDayNameFromDate(currentPiketDate) !== assignedHari) {
+    currentPiketDate = getNearestDateForDayName(assignedHari);
+  }
+
   const teacherName = (session && session.nama) ? session.nama : ((db.guruProfile && db.guruProfile.nama) ? db.guruProfile.nama : "Guru Piket");
   const todayStr = getLocalDateString();
   const isToday = currentPiketDate === todayStr;
@@ -21635,26 +22066,23 @@ function renderJurnalPiket(container) {
     <div class="card" style="margin-bottom: 20px; border-top: 4px solid #f59e0b;">
       <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 14px;">
         <div>
-          <h3 style="margin: 0; font-size: 1.15rem; font-weight: 700; color: var(--text-primary);">
-            <i class="fas fa-book-journal-whills" style="color: #f59e0b;"></i> Buku Catatan Kejadian & Jurnal Piket Harian
-          </h3>
+          <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+            <h3 style="margin: 0; font-size: 1.15rem; font-weight: 700; color: var(--text-primary);">
+              <i class="fas fa-book-journal-whills" style="color: #f59e0b;"></i> Buku Catatan Kejadian & Jurnal Piket Harian
+            </h3>
+            ${assignedHari ? `
+              <span class="badge" style="background: rgba(14,165,233,0.18); color: #0284c7; border: 1px solid rgba(14,165,233,0.4); font-weight: 700; font-size: 0.78rem; padding: 2px 8px;">
+                <i class="fas fa-calendar-check"></i> Khusus Hari ${assignedHari.toUpperCase()}
+              </span>
+            ` : ''}
+          </div>
           <div style="font-size: 0.82rem; color: var(--text-muted); margin-top: 2px;">
             Hari & Tanggal: <strong>${formatDateIndoFull(currentPiketDate)}</strong> &bull; Total Kejadian: <strong>${dutyNotes.length} Catatan</strong>
           </div>
         </div>
 
         <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
-          <div style="display: flex; align-items: center; gap: 6px; background: rgba(0,0,0,0.03); padding: 4px 8px; border-radius: 8px; border: 1px solid var(--border-color);">
-            <label for="jurnal-piket-date" style="font-size: 0.78rem; font-weight: 700; margin: 0;">
-              Tanggal:
-            </label>
-            <input type="date" id="jurnal-piket-date" class="form-control" style="font-size: 0.85rem; padding: 4px 8px; width: 145px;" value="${currentPiketDate}" onchange="changePiketDate(this.value)">
-            ${!isToday ? `
-              <button type="button" class="btn btn-secondary btn-sm" onclick="changePiketDate('${todayStr}')" style="font-size: 0.75rem; padding: 4px 8px;">
-                Hari Ini
-              </button>
-            ` : ''}
-          </div>
+          ${getPiketDateToolbarControlsHtml()}
 
           <button type="button" class="btn btn-secondary btn-sm" onclick="printJurnalPiketOnly()">
             <i class="fas fa-print"></i> Cetak Jurnal
@@ -21664,6 +22092,8 @@ function renderJurnalPiket(container) {
           </button>
         </div>
       </div>
+
+      ${getPiketAdminDayFilterHtml()}
     </div>
 
     <!-- Table of Duty Journal Notes -->
@@ -21889,6 +22319,8 @@ function openModalDetailKelasPiket(kelasId) {
 function openModalKejadianPiket(catatanId = null) {
   const existing = catatanId ? (db.jurnalPiket || []).find(j => j.id === catatanId) : null;
   const session = getSession();
+  const isAdmin = session && session.role === "admin";
+  const assignedHari = !isAdmin ? getAssignedHariPiket(session) : (window.adminPiketDayFilter || "");
   const defaultPetugas = (session && session.nama) ? session.nama : ((db.guruProfile && db.guruProfile.nama) ? db.guruProfile.nama : "Guru Piket Sekolah");
 
   const now = new Date();
@@ -21905,13 +22337,23 @@ function openModalKejadianPiket(catatanId = null) {
   const tindakLanjutVal = existing ? existing.tindakLanjut : "";
   const petugasVal = existing ? existing.petugas : defaultPetugas;
   const statusVal = existing ? existing.status : "Selesai";
+  const availableDayDates = assignedHari ? getAvailableDatesForDay(assignedHari) : [];
 
   const bodyHtml = `
     <form id="form-kejadian-piket" onsubmit="handleSaveKejadianPiket(event, '${catatanId || ''}')">
       <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 12px;">
         <div>
-          <label class="form-label" for="kp-tanggal">Tanggal Kejadian <span style="color:#ef4444;">*</span></label>
-          <input type="date" id="kp-tanggal" class="form-control" value="${tglVal}" required>
+          <label class="form-label" for="kp-tanggal">
+            Tanggal Kejadian <span style="color:#ef4444;">*</span>
+            ${assignedHari ? `<span class="badge" style="background:rgba(14,165,233,0.15); color:#0284c7; font-size:0.7rem; padding:1px 6px;">Hari ${assignedHari}</span>` : ''}
+          </label>
+          ${assignedHari ? `
+            <select id="kp-tanggal" class="form-control" required>
+              ${availableDayDates.map(d => `<option value="${d}" ${d === tglVal ? 'selected' : ''}>${formatDateIndoFull(d)}</option>`).join("")}
+            </select>
+          ` : `
+            <input type="date" id="kp-tanggal" class="form-control" value="${tglVal}" required>
+          `}
         </div>
         <div>
           <label class="form-label" for="kp-waktu">Waktu (Jam) <span style="color:#ef4444;">*</span></label>
@@ -21995,6 +22437,17 @@ function handleSaveKejadianPiket(event, catatanId) {
     return;
   }
 
+  const session = getSession();
+  const isAdmin = session && session.role === "admin";
+  const assignedHari = !isAdmin ? getAssignedHariPiket(session) : (window.adminPiketDayFilter || "");
+  if (assignedHari) {
+    const dayName = getDayNameFromDate(tanggal);
+    if (dayName !== assignedHari) {
+      showToast(`Akun piket bertugas khusus hari ${assignedHari}. Tidak dapat mencatat kejadian di hari ${dayName}.`);
+      return;
+    }
+  }
+
   db.jurnalPiket = db.jurnalPiket || [];
 
   if (catatanId) {
@@ -22064,6 +22517,11 @@ function deleteKejadianPiket(id) {
 function printLaporanPiketHarian() {
   const summary = getPiketAttendanceSummary(currentPiketDate);
   const session = getSession();
+  const isAdmin = session && session.role === "admin";
+  const assignedHari = !isAdmin ? getAssignedHariPiket(session) : (window.adminPiketDayFilter || "");
+  const dayName = getDayNameFromDate(currentPiketDate);
+  const hariTag = assignedHari ? `(HARI ${assignedHari.toUpperCase()})` : `(HARI ${dayName.toUpperCase()})`;
+
   const teacherName = (session && session.nama) ? session.nama : ((db.guruProfile && db.guruProfile.nama) ? db.guruProfile.nama : "Guru Piket Sekolah");
   const teacherNip = (db.guruProfile && db.guruProfile.nip) ? `NIP. ${db.guruProfile.nip}` : "-";
   const kepalaSekolah = (db.guruProfile && db.guruProfile.kepalaSekolah) ? db.guruProfile.kepalaSekolah : "Kepala SMA Negeri 1 Lasolo";
@@ -22084,7 +22542,7 @@ function printLaporanPiketHarian() {
     <!DOCTYPE html>
     <html>
     <head>
-      <title>Laporan Harian Guru Piket - ${formatDateIndo(currentPiketDate)}</title>
+      <title>Laporan Harian Guru Piket ${hariTag} - ${formatDateIndo(currentPiketDate)}</title>
       <style>
         body { font-family: 'Times New Roman', Times, serif; margin: 12mm 15mm; color: #000; line-height: 1.35; font-size: 10.5pt; }
         .kop { text-align: center; border-bottom: 3px double #000; padding-bottom: 8px; margin-bottom: 12px; }
@@ -22115,13 +22573,13 @@ function printLaporanPiketHarian() {
         <p>${escapeHtml(schoolAddress)}</p>
       </div>
 
-      <h4>LAPORAN HARIAN GURU PIKET SEKOLAH</h4>
+      <h4>LAPORAN HARIAN GURU PIKET SEKOLAH ${hariTag}</h4>
       <div class="subtitle">Rekapitulasi Presensi Seluruh Rombel, Ketertiban Siswa, dan Catatan Kejadian Piket</div>
 
       <table class="meta">
         <tr>
           <td style="width: 18%;"><strong>Hari / Tanggal</strong></td>
-          <td style="width: 32%;">: ${formatDateIndoFull(currentPiketDate)}</td>
+          <td style="width: 32%;">: ${formatDateIndoFull(currentPiketDate)} ${assignedHari ? `(Khusus Hari ${assignedHari})` : ''}</td>
           <td style="width: 20%;"><strong>Petugas Guru Piket</strong></td>
           <td style="width: 30%;">: ${escapeHtml(teacherName)}</td>
         </tr>
@@ -22290,6 +22748,11 @@ function printLaporanPiketHarian() {
 
 function printJurnalPiketOnly() {
   const session = getSession();
+  const isAdmin = session && session.role === "admin";
+  const assignedHari = !isAdmin ? getAssignedHariPiket(session) : (window.adminPiketDayFilter || "");
+  const dayName = getDayNameFromDate(currentPiketDate);
+  const hariTag = assignedHari ? `(HARI ${assignedHari.toUpperCase()})` : `(HARI ${dayName.toUpperCase()})`;
+
   const teacherName = (session && session.nama) ? session.nama : ((db.guruProfile && db.guruProfile.nama) ? db.guruProfile.nama : "Guru Piket Sekolah");
   const teacherNip = (db.guruProfile && db.guruProfile.nip) ? `NIP. ${db.guruProfile.nip}` : "-";
   const kepalaSekolah = (db.guruProfile && db.guruProfile.kepalaSekolah) ? db.guruProfile.kepalaSekolah : "Kepala SMA Negeri 1 Lasolo";
@@ -22310,7 +22773,7 @@ function printJurnalPiketOnly() {
     <!DOCTYPE html>
     <html>
     <head>
-      <title>Buku Jurnal Kejadian Guru Piket - ${formatDateIndo(currentPiketDate)}</title>
+      <title>Buku Jurnal Kejadian Guru Piket ${hariTag} - ${formatDateIndo(currentPiketDate)}</title>
       <style>
         body { font-family: 'Times New Roman', Times, serif; margin: 15mm; color: #000; line-height: 1.4; font-size: 11pt; }
         .kop { text-align: center; border-bottom: 3px double #000; padding-bottom: 8px; margin-bottom: 14px; }
@@ -22340,13 +22803,13 @@ function printJurnalPiketOnly() {
         <p>${escapeHtml(schoolAddress)}</p>
       </div>
 
-      <h4>BUKU CATATAN KEJADIAN / JURNAL HARIAN GURU PIKET</h4>
+      <h4>BUKU CATATAN KEJADIAN / JURNAL HARIAN GURU PIKET ${hariTag}</h4>
       <div class="subtitle">Catatan Keterlambatan Gerbang, Izin Keluar, Ketertiban Siswa, dan Pelayanan Tamu</div>
 
       <table class="meta">
         <tr>
           <td style="width: 15%;"><strong>Hari / Tanggal</strong></td>
-          <td style="width: 35%;">: ${formatDateIndoFull(currentPiketDate)}</td>
+          <td style="width: 35%;">: ${formatDateIndoFull(currentPiketDate)} ${assignedHari ? `(Khusus Hari ${assignedHari})` : ''}</td>
           <td style="width: 18%;"><strong>Petugas Guru Piket</strong></td>
           <td style="width: 32%;">: ${escapeHtml(teacherName)}</td>
         </tr>
@@ -22417,9 +22880,15 @@ function printJurnalPiketOnly() {
 function exportPiketHarianCSV() {
   const summary = getPiketAttendanceSummary(currentPiketDate);
   const userSchool = getCurrentSchoolName();
+  const session = getSession();
+  const isAdmin = session && session.role === "admin";
+  const assignedHari = !isAdmin ? getAssignedHariPiket(session) : (window.adminPiketDayFilter || "");
+  const dayName = getDayNameFromDate(currentPiketDate);
+  const hariTag = assignedHari ? `(HARI ${assignedHari.toUpperCase()})` : `(HARI ${dayName.toUpperCase()})`;
 
-  let csv = `LAPORAN HARIAN GURU PIKET SEKOLAH\r\n`;
+  let csv = `LAPORAN HARIAN GURU PIKET SEKOLAH ${hariTag}\r\n`;
   csv += `Sekolah:;${userSchool}\r\n`;
+  csv += `Hari Tugas:;${dayName}${assignedHari ? ` (Penugasan Khusus Hari ${assignedHari})` : ''}\r\n`;
   csv += `Tanggal:;${formatDateIndoFull(currentPiketDate)}\r\n`;
   csv += `Total Siswa Sekolah:;${summary.totalSiswaSekolah}\r\n`;
   csv += `Persentase Kehadiran Sekolah:;${summary.persenKehadiranSekolah}%\r\n`;
@@ -22446,7 +22915,8 @@ function exportPiketHarianCSV() {
     csv += `${idx + 1};"${s.nisn || ''}";"${s.nama}";"${item.kelas.nama}";"${item.status}";"${item.kelas.waliKelas || '-'}";"${contact.namaWali}";"${contact.noHp || ''}"\r\n`;
   });
 
-  downloadCSV(csv, `laporan_guru_piket_${currentPiketDate}.csv`);
+  const filePrefix = assignedHari ? `laporan_guru_piket_${assignedHari.toLowerCase()}_` : `laporan_guru_piket_${dayName.toLowerCase()}_`;
+  downloadCSV(csv, `${filePrefix}${currentPiketDate}.csv`);
   showToast("File laporan harian piket berhasil diunduh dalam format CSV!");
 }
 
