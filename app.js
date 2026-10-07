@@ -749,6 +749,7 @@ async function getRegisteredUsers() {
     { email: "admin@smansaku.id", password: "admin123", nama: "Administrator Sman_Saku", role: "admin" },
     { email: "kamria@smansaku.id", password: "@kamria123", nama: "Dr. Kamria, S.Pd., M.Si", role: "admin" },
     { email: "ikbar@smansaku.id", password: "r@bk10812", nama: "Muh. Ikbar, S.Pd., Gr", role: "guru_bk" },
+    { email: "piket@smansaku.id", password: "piket123", nama: "Guru Piket Sekolah, S.Pd.", role: "guru_piket" },
     { email: "guru@smansaku.id", password: "guru123", nama: "Guru Mata Pelajaran, S.Pd.", role: "guru" }
   ];
 
@@ -762,6 +763,12 @@ async function getRegisteredUsers() {
   const ikbarUser = users.find(u => u.email.toLowerCase() === "ikbar@smansaku.id");
   if (!ikbarUser) {
     users.push({ email: "ikbar@smansaku.id", password: "r@bk10812", nama: "Muh. Ikbar, S.Pd., Gr", role: "guru_bk" });
+    changed = true;
+  }
+
+  const piketUser = users.find(u => u.email.toLowerCase() === "piket@smansaku.id");
+  if (!piketUser) {
+    users.push({ email: "piket@smansaku.id", password: "piket123", nama: "Guru Piket Sekolah, S.Pd.", role: "guru_piket" });
     changed = true;
   }
 
@@ -877,6 +884,11 @@ function isUserWaliKelas(session) {
 function getAllowedModesForRole(role, session = null) {
   if (!session) session = getSession();
 
+  if (role === "guru_piket") {
+    // Akun Guru Piket memiliki akses utama ke Mode Guru Piket dan Mode Guru Mapel
+    return ["gurupiket", "mapel"];
+  }
+
   if (role === "guru_bk") {
     // Akun Guru BK HANYA memiliki akses ke Mode Guru BK dan Mode Guru Wali
     return ["gurubk", "guruwali"];
@@ -884,18 +896,16 @@ function getAllowedModesForRole(role, session = null) {
 
   if (role === "admin") {
     // Administrator selalu memiliki akses ke seluruh mode
-    return ["mapel", "walikelas", "guruwali", "gurubk"];
+    return ["mapel", "walikelas", "guruwali", "gurubk", "gurupiket"];
   }
 
   // Akun Guru Biasa:
-  // Cek apakah akun guru ini teridentifikasi sebagai Wali Kelas oleh Administrator
+  // Guru dapat mengakses Mode Mapel, Mode Guru Piket (saat hari bertugas piket), dan Guru Wali (serta Wali Kelas jika ditugaskan)
   const isWali = isUserWaliKelas(session);
   if (isWali) {
-    // Guru yang teridentifikasi sebagai Wali Kelas: Mode Guru Mapel, Mode Wali Kelas, Mode Guru Wali
-    return ["mapel", "walikelas", "guruwali"];
+    return ["mapel", "gurupiket", "walikelas", "guruwali"];
   } else {
-    // Guru yang BUKAN Wali Kelas: Mode Wali Kelas TIDAK MUNCUL! Hanya Mode Mapel & Mode Guru Wali
-    return ["mapel", "guruwali"];
+    return ["mapel", "gurupiket", "guruwali"];
   }
 }
 
@@ -3087,6 +3097,10 @@ function renderPage(pageId) {
         titleEl.textContent = "Dashboard Guru BK";
         subtitleEl.textContent = `Laporan hari ini (${formatDateIndo(todayStr)}), pemantauan kasus siswa, dan layanan bimbingan konseling.`;
         renderDashboardGuruBK(container);
+      } else if (currentAppMode === "gurupiket") {
+        titleEl.textContent = "Dashboard Guru Piket";
+        subtitleEl.textContent = `Laporan presensi seluruh kelas hari ini (${formatDateIndo(todayStr)}), rekap kehadiran, dan catatan kejadian piket.`;
+        renderDashboardGuruPiket(container);
       } else {
         titleEl.textContent = "Dashboard";
         subtitleEl.textContent = `Ringkasan aktivitas dan laporan administrasi Anda hari ini (${formatDateIndo(todayStr)}).`;
@@ -3123,6 +3137,21 @@ function renderPage(pageId) {
       titleEl.textContent = "Rekapitulasi & Laporan Resmi BK";
       subtitleEl.textContent = "Laporan berkala pelaksanaan bimbingan konseling dan format cetak administrasi BK.";
       renderRekapLaporanBK(container);
+      break;
+    case "rekap_kelas_piket":
+      titleEl.textContent = "Rekap Kehadiran Seluruh Kelas";
+      subtitleEl.textContent = "Tinjauan kehadiran dan persentase kehadiran per rombel kelas pada hari tugas piket.";
+      renderRekapKelasPiket(container);
+      break;
+    case "radar_piket":
+      titleEl.textContent = "Radar Siswa Tidak Hadir & Terlambat";
+      subtitleEl.textContent = "Daftar siswa yang tidak hadir atau terlambat di seluruh sekolah untuk tindak lanjut piket.";
+      renderRadarPiket(container);
+      break;
+    case "jurnal_piket":
+      titleEl.textContent = "Buku Catatan Kejadian / Jurnal Piket";
+      subtitleEl.textContent = "Pencatatan kejadian khusus, siswa terlambat, izin keluar, dan laporan piket harian.";
+      renderJurnalPiket(container);
       break;
     case "rekap_final":
       titleEl.textContent = "Rekap Presensi Final Kelas";
@@ -13992,6 +14021,7 @@ function initAppMode() {
     db.peminatanKarirBK = db.peminatanKarirBK || [];
     db.agendaBK = db.agendaBK || [];
     db.kelasBimbinganBK = db.kelasBimbinganBK || [];
+    db.jurnalPiket = db.jurnalPiket || [];
 
     const assignedClass = session ? getAssignedWaliKelas(session) : null;
     if (assignedClass) {
@@ -14072,6 +14102,24 @@ function initAppMode() {
         }
       ];
     }
+
+    if (db.jurnalPiket.length === 0 && (db.siswa && db.siswa.length > 0)) {
+      const today = getLocalDateString();
+      db.jurnalPiket = [
+        {
+          id: "piket-sample-1",
+          tanggal: today,
+          waktu: "07:15",
+          tipe: "Keterlambatan Gerbang",
+          judul: "Penertiban Siswa Terlambat Masuk",
+          uraian: "Pencatatan 3 siswa yang tiba setelah pukul 07.15 karena kendala cuaca hujan gerimis di jalan.",
+          petugas: session ? session.nama : "Guru Piket Sekolah, S.Pd.",
+          tindakLanjut: "Diberikan pengarahan disiplin di pos piket, dicatat di buku kehadiran, dan diizinkan masuk ke kelas masing-masing.",
+          status: "Selesai",
+          createdAt: new Date().toISOString()
+        }
+      ];
+    }
   }
 
   updateModeSwitcherUI(currentAppMode);
@@ -14127,6 +14175,7 @@ function setAppMode(mode) {
   if (mode === "walikelas") toastMsg = "Beralih ke Mode Wali Kelas";
   if (mode === "guruwali") toastMsg = "Beralih ke Mode Guru Wali";
   if (mode === "gurubk") toastMsg = "Beralih ke Mode Guru BK (Bimbingan Konseling)";
+  if (mode === "gurupiket") toastMsg = "Beralih ke Mode Guru Piket (Piket Harian Seluruh Kelas)";
   showToast(toastMsg);
 
   // Sinkronkan data terbaru saat beralih mode
@@ -14165,6 +14214,8 @@ function updateModeSwitcherUI(mode) {
       icon.className = "fas fa-hand-holding-heart";
     } else if (mode === "gurubk") {
       icon.className = "fas fa-user-shield";
+    } else if (mode === "gurupiket") {
+      icon.className = "fas fa-clipboard-check";
     } else {
       icon.className = "fas fa-chalkboard-user";
     }
@@ -14177,6 +14228,8 @@ function updateModeSwitcherUI(mode) {
       title.textContent = "Guru Wali";
     } else if (mode === "gurubk") {
       title.textContent = "Guru BK";
+    } else if (mode === "gurupiket") {
+      title.textContent = "Guru Piket";
     } else {
       title.textContent = "Guru Mapel";
     }
@@ -14213,6 +14266,7 @@ function updateModeSwitcherUI(mode) {
         }
         if (itemMode === "guruwali") badge.textContent = "Mentor Asuhan";
         if (itemMode === "gurubk") badge.textContent = "Konseling & Karir";
+        if (itemMode === "gurupiket") badge.textContent = "Piket Harian";
       }
     }
   });
@@ -14258,6 +14312,16 @@ function renderSidebarMenu() {
       { page: "karir_bk", icon: "fas fa-compass", label: "Peminatan & Karir" },
       { page: "agenda_bk", icon: "fas fa-calendar-check", label: "Agenda & Jadwal" },
       { page: "rekap_bk", icon: "fas fa-file-lines", label: "Laporan BK" },
+      { page: "kontak", icon: "fas fa-address-book", label: "Kontak Wali" },
+      ...(isAdmin ? [{ page: "akun", icon: "fas fa-users-cog", label: "Kelola Akun" }] : []),
+      { page: "profil", icon: "fas fa-user-cog", label: "Profil" }
+    ];
+  } else if (currentAppMode === "gurupiket") {
+    items = [
+      { page: "dashboard", icon: "fas fa-chart-pie", label: "Dashboard Piket" },
+      { page: "rekap_kelas_piket", icon: "fas fa-clipboard-check", label: "Rekap Kelas" },
+      { page: "radar_piket", icon: "fas fa-user-clock", label: "Radar Siswa" },
+      { page: "jurnal_piket", icon: "fas fa-book-bookmark", label: "Jurnal Piket" },
       { page: "kontak", icon: "fas fa-address-book", label: "Kontak Wali" },
       ...(isAdmin ? [{ page: "akun", icon: "fas fa-users-cog", label: "Kelola Akun" }] : []),
       { page: "profil", icon: "fas fa-user-cog", label: "Profil" }
@@ -20545,4 +20609,1845 @@ ${userSchool}`;
 
   window.open(`https://wa.me/${contact.cleanPhone}?text=${encodeURIComponent(message)}`, "_blank");
 }
+
+// ============================================================================
+// MODE GURU PIKET IMPLEMENTATION
+// ============================================================================
+
+let currentPiketDate = getLocalDateString();
+let currentPiketTingkatFilter = "all";
+let currentPiketSortBy = "persen_asc";
+let currentPiketRadarTab = "all";
+
+function changePiketDate(dateVal) {
+  if (!dateVal) return;
+  currentPiketDate = dateVal;
+  const activeNav = document.querySelector(".sidebar-menu li.active");
+  const activePage = activeNav ? activeNav.getAttribute("data-page") : "dashboard";
+  if (typeof renderPage === "function" && activePage) {
+    renderPage(activePage);
+  } else {
+    navigate("dashboard");
+  }
+}
+
+function getPiketAttendanceSummary(targetDate = currentPiketDate) {
+  const classes = Array.isArray(db.kelas) ? [...db.kelas] : [];
+  classes.sort((a, b) => (a.nama || "").localeCompare(b.nama || "", undefined, { numeric: true }));
+
+  const attendanceOnDate = (Array.isArray(db.absensi) ? db.absensi : []).filter(a => a.tanggal === targetDate);
+
+  let totalSiswaSekolah = 0;
+  let totalHadir = 0;
+  let totalSakit = 0;
+  let totalIzin = 0;
+  let totalAlpa = 0;
+  let totalTerlambat = 0;
+  let totalBolos = 0;
+  let totalBelumDiabsen = 0;
+  let totalKelasTerabsen = 0;
+
+  const classSummaries = [];
+  const radarStudents = [];
+
+  classes.forEach(k => {
+    const classStudents = (Array.isArray(db.siswa) ? db.siswa : []).filter(s => s.kelasId === k.id);
+    const classTotal = classStudents.length;
+    totalSiswaSekolah += classTotal;
+
+    const classAttendance = attendanceOnDate.filter(a => a.kelasId === k.id);
+    const mapelsRecorded = [...new Set(classAttendance.map(a => a.mapel).filter(Boolean))];
+    const isTerabsen = classAttendance.length > 0;
+    if (isTerabsen) totalKelasTerabsen++;
+
+    let hadirCount = 0;
+    let sakitCount = 0;
+    let izinCount = 0;
+    let alpaCount = 0;
+    let terlambatCount = 0;
+    let bolosCount = 0;
+    let belumDiabsenCount = 0;
+
+    const studentStatuses = [];
+
+    classStudents.forEach(s => {
+      const records = classAttendance.filter(a => a.siswaId === s.id);
+      let finalStatus = "Belum Diabsen";
+
+      if (records.length > 0) {
+        const statuses = records.map(r => r.status);
+        if (statuses.includes("Bolos")) finalStatus = "Bolos";
+        else if (statuses.includes("Alpa")) finalStatus = "Alpa";
+        else if (statuses.includes("Sakit")) finalStatus = "Sakit";
+        else if (statuses.includes("Izin")) finalStatus = "Izin";
+        else if (statuses.includes("Terlambat")) finalStatus = "Terlambat";
+        else if (statuses.every(st => st === "Hadir")) finalStatus = "Hadir";
+        else finalStatus = records[0].status || "Hadir";
+      }
+
+      studentStatuses.push({
+        siswa: s,
+        status: finalStatus,
+        records: records
+      });
+
+      if (finalStatus === "Hadir") hadirCount++;
+      else if (finalStatus === "Sakit") sakitCount++;
+      else if (finalStatus === "Izin") izinCount++;
+      else if (finalStatus === "Alpa") alpaCount++;
+      else if (finalStatus === "Terlambat") terlambatCount++;
+      else if (finalStatus === "Bolos") bolosCount++;
+      else belumDiabsenCount++;
+
+      if (["Sakit", "Izin", "Alpa", "Bolos", "Terlambat"].includes(finalStatus)) {
+        radarStudents.push({
+          siswa: s,
+          kelas: k,
+          status: finalStatus,
+          mapels: mapelsRecorded.join(", "),
+          records: records
+        });
+      }
+    });
+
+    totalHadir += hadirCount;
+    totalSakit += sakitCount;
+    totalIzin += izinCount;
+    totalAlpa += alpaCount;
+    totalTerlambat += terlambatCount;
+    totalBolos += bolosCount;
+    totalBelumDiabsen += belumDiabsenCount;
+
+    const persen = classTotal > 0 ? Math.round(((hadirCount + terlambatCount) / classTotal) * 100) : 0;
+
+    classSummaries.push({
+      kelas: k,
+      totalSiswa: classTotal,
+      isTerabsen,
+      mapelsRecorded,
+      hadir: hadirCount,
+      sakit: sakitCount,
+      izin: izinCount,
+      alpa: alpaCount,
+      terlambat: terlambatCount,
+      bolos: bolosCount,
+      belumDiabsen: belumDiabsenCount,
+      persen,
+      studentStatuses
+    });
+  });
+
+  const totalTidakHadir = totalSakit + totalIzin + totalAlpa + totalBolos;
+  const persenKehadiranSekolah = totalSiswaSekolah > 0 ? Math.round(((totalHadir + totalTerlambat) / totalSiswaSekolah) * 100) : 0;
+
+  return {
+    targetDate,
+    classesCount: classes.length,
+    totalKelasTerabsen,
+    totalSiswaSekolah,
+    totalHadir,
+    totalSakit,
+    totalIzin,
+    totalAlpa,
+    totalTerlambat,
+    totalBolos,
+    totalBelumDiabsen,
+    totalTidakHadir,
+    persenKehadiranSekolah,
+    classSummaries,
+    radarStudents
+  };
+}
+
+function renderDashboardGuruPiket(container) {
+  container = container || document.getElementById("content-container") || document.getElementById("content-area");
+  if (!container) return;
+
+  const summary = getPiketAttendanceSummary(currentPiketDate);
+  const userSchool = getCurrentSchoolName();
+  const session = getSession();
+  const teacherName = (session && session.nama) ? session.nama : ((db.guruProfile && db.guruProfile.nama) ? db.guruProfile.nama : "Guru Piket");
+  const todayStr = getLocalDateString();
+  const isToday = currentPiketDate === todayStr;
+
+  const dutyNotes = (db.jurnalPiket || []).filter(j => j.tanggal === currentPiketDate);
+  dutyNotes.sort((a, b) => (b.waktu || "").localeCompare(a.waktu || ""));
+
+  container.innerHTML = `
+    <!-- Top Control Toolbar -->
+    <div class="card" style="margin-bottom: 20px; border-top: 4px solid #0284c7; background: linear-gradient(to right, rgba(14,165,233,0.04), rgba(255,255,255,0.95));">
+      <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 14px;">
+        <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+          <div style="display:flex; align-items:center; gap:10px;">
+            <div style="width: 44px; height: 44px; border-radius: 12px; background: linear-gradient(135deg, #0ea5e9, #0284c7); display:flex; align-items:center; justify-content:center; color:#fff; font-size:1.25rem; box-shadow: 0 4px 12px rgba(14,165,233,0.3);">
+              <i class="fas fa-clipboard-check"></i>
+            </div>
+            <div>
+              <h3 style="margin: 0; font-size: 1.15rem; font-weight: 700; color: var(--text-primary);">
+                Pemantauan Piket Harian Sekolah
+              </h3>
+              <div style="font-size: 0.82rem; color: var(--text-muted);">
+                Petugas Piket: <strong>${escapeHtml(teacherName)}</strong> &bull; ${escapeHtml(userSchool)}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+          <div style="display: flex; align-items: center; gap: 6px; background: rgba(0,0,0,0.03); padding: 4px 8px; border-radius: 8px; border: 1px solid var(--border-color);">
+            <label for="piket-date-picker" style="font-size: 0.78rem; font-weight: 700; margin: 0; color: var(--text-secondary);">
+              <i class="fas fa-calendar-alt" style="color: #0284c7;"></i> Tanggal:
+            </label>
+            <input type="date" id="piket-date-picker" class="form-control" style="font-size: 0.85rem; padding: 4px 8px; width: 145px;" value="${currentPiketDate}" onchange="changePiketDate(this.value)">
+            ${!isToday ? `
+              <button type="button" class="btn btn-secondary btn-sm" onclick="changePiketDate('${todayStr}')" style="font-size: 0.75rem; padding: 4px 8px;">
+                Hari Ini
+              </button>
+            ` : `
+              <span class="badge badge-hadir" style="font-size: 0.72rem; padding: 4px 7px;">Hari Ini</span>
+            `}
+          </div>
+
+          <div style="display: flex; gap: 6px; flex-wrap: wrap;">
+            <button type="button" class="btn btn-secondary btn-sm" onclick="printLaporanPiketHarian()" title="Cetak Rekap Laporan Guru Piket">
+              <i class="fas fa-print" style="color:#0284c7;"></i> Cetak Laporan
+            </button>
+            <button type="button" class="btn btn-secondary btn-sm" onclick="exportPiketHarianCSV()" title="Ekspor data ke file spreadsheet CSV">
+              <i class="fas fa-file-csv" style="color:#10b981;"></i> Ekspor CSV
+            </button>
+            <button type="button" class="btn btn-primary btn-sm" onclick="openModalKejadianPiket()" title="Catat keterlambatan, perizinan, atau kejadian khusus">
+              <i class="fas fa-plus-circle"></i> + Catat Kejadian
+            </button>
+          </div>
+        </div>
+      </div>
+      
+      <div style="margin-top: 10px; padding-top: 8px; border-top: 1px dashed var(--border-color); font-size: 0.82rem; color: var(--text-secondary); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+        <div>
+          <i class="fas fa-calendar-day" style="color: #0284c7;"></i> <strong>${formatDateIndoFull(currentPiketDate)}</strong>
+        </div>
+        <div>
+          Status: <strong>${summary.totalKelasTerabsen} dari ${summary.classesCount} Kelas Terabsen</strong>
+        </div>
+      </div>
+    </div>
+
+    <!-- 4 Main KPI Cards -->
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; margin-bottom: 20px;">
+      <!-- Card 1: Persentase Kehadiran Sekolah -->
+      <div class="card" style="margin: 0; padding: 16px; border-left: 5px solid #10b981; position: relative; overflow: hidden;">
+        <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+          <div>
+            <div style="font-size: 0.76rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px;">Kehadiran Sekolah</div>
+            <div style="font-size: 1.85rem; font-weight: 800; color: #059669; line-height: 1.2; margin-top: 4px;">
+              ${summary.persenKehadiranSekolah}%
+            </div>
+          </div>
+          <div style="width: 40px; height: 40px; border-radius: 10px; background: rgba(16,185,129,0.12); display: flex; align-items: center; justify-content: center; color: #10b981; font-size: 1.2rem;">
+            <i class="fas fa-user-check"></i>
+          </div>
+        </div>
+        <div style="margin-top: 10px;">
+          <div style="background: rgba(0,0,0,0.06); border-radius: 6px; height: 7px; overflow: hidden;">
+            <div style="background: #10b981; width: ${summary.persenKehadiranSekolah}%; height: 100%;"></div>
+          </div>
+          <div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 6px; display: flex; justify-content: space-between;">
+            <span>Hadir: <strong>${summary.totalHadir + summary.totalTerlambat}</strong></span>
+            <span>Total: <strong>${summary.totalSiswaSekolah}</strong></span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Card 2: Siswa Tidak Hadir -->
+      <div class="card" style="margin: 0; padding: 16px; border-left: 5px solid #ef4444; position: relative; overflow: hidden;">
+        <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+          <div>
+            <div style="font-size: 0.76rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px;">Tidak Hadir (S/I/A/B)</div>
+            <div style="font-size: 1.85rem; font-weight: 800; color: #dc2626; line-height: 1.2; margin-top: 4px;">
+              ${summary.totalTidakHadir} <span style="font-size: 0.9rem; font-weight: 500; color: var(--text-muted);">Siswa</span>
+            </div>
+          </div>
+          <div style="width: 40px; height: 40px; border-radius: 10px; background: rgba(239,68,68,0.12); display: flex; align-items: center; justify-content: center; color: #ef4444; font-size: 1.2rem;">
+            <i class="fas fa-user-times"></i>
+          </div>
+        </div>
+        <div style="margin-top: 10px; display: flex; gap: 4px; flex-wrap: wrap;">
+          <span class="badge badge-sakit" style="font-size: 0.7rem; padding: 2px 6px;">S: ${summary.totalSakit}</span>
+          <span class="badge badge-izin" style="font-size: 0.7rem; padding: 2px 6px;">I: ${summary.totalIzin}</span>
+          <span class="badge badge-alpa" style="font-size: 0.7rem; padding: 2px 6px;">A: ${summary.totalAlpa}</span>
+          <span class="badge badge-bolos" style="font-size: 0.7rem; padding: 2px 6px;">B: ${summary.totalBolos}</span>
+        </div>
+      </div>
+
+      <!-- Card 3: Siswa Terlambat -->
+      <div class="card" style="margin: 0; padding: 16px; border-left: 5px solid #f59e0b; position: relative; overflow: hidden;">
+        <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+          <div>
+            <div style="font-size: 0.76rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px;">Siswa Terlambat</div>
+            <div style="font-size: 1.85rem; font-weight: 800; color: #d97706; line-height: 1.2; margin-top: 4px;">
+              ${summary.totalTerlambat} <span style="font-size: 0.9rem; font-weight: 500; color: var(--text-muted);">Siswa</span>
+            </div>
+          </div>
+          <div style="width: 40px; height: 40px; border-radius: 10px; background: rgba(245,158,11,0.12); display: flex; align-items: center; justify-content: center; color: #f59e0b; font-size: 1.2rem;">
+            <i class="fas fa-clock"></i>
+          </div>
+        </div>
+        <div style="margin-top: 10px; font-size: 0.75rem; color: var(--text-muted);">
+          <span>Perlu pembinaan disiplin gerbang piket</span>
+        </div>
+      </div>
+
+      <!-- Card 4: Status Rombongan Belajar -->
+      <div class="card" style="margin: 0; padding: 16px; border-left: 5px solid #0284c7; position: relative; overflow: hidden;">
+        <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+          <div>
+            <div style="font-size: 0.76rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px;">Rombel Terabsen</div>
+            <div style="font-size: 1.85rem; font-weight: 800; color: #0284c7; line-height: 1.2; margin-top: 4px;">
+              ${summary.totalKelasTerabsen} <span style="font-size: 0.95rem; font-weight: 600; color: var(--text-muted);">/ ${summary.classesCount} Rombel</span>
+            </div>
+          </div>
+          <div style="width: 40px; height: 40px; border-radius: 10px; background: rgba(14,165,233,0.12); display: flex; align-items: center; justify-content: center; color: #0284c7; font-size: 1.2rem;">
+            <i class="fas fa-school"></i>
+          </div>
+        </div>
+        <div style="margin-top: 10px; font-size: 0.75rem;">
+          ${summary.totalKelasTerabsen === summary.classesCount ? `
+            <span class="badge badge-hadir" style="font-size: 0.72rem;"><i class="fas fa-check"></i> Lengkap Seluruh Kelas</span>
+          ` : `
+            <span class="badge badge-sakit" style="font-size: 0.72rem;"><i class="fas fa-exclamation-triangle"></i> ${summary.classesCount - summary.totalKelasTerabsen} Kelas Belum Mengabsen</span>
+          `}
+        </div>
+      </div>
+    </div>
+
+    <!-- Quick Status Breakdown Bar -->
+    <div class="card" style="margin-bottom: 24px; padding: 12px 18px; background: var(--bg-surface);">
+      <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;">
+        <div style="font-size: 0.82rem; font-weight: 700; color: var(--text-secondary); text-transform: uppercase;">
+          <i class="fas fa-chart-pie" style="color: #0284c7;"></i> Rincian Status Presensi Siswa:
+        </div>
+        <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+          <span class="badge badge-hadir" style="font-size: 0.78rem; padding: 4px 10px;">
+            <i class="fas fa-check"></i> Hadir: <strong>${summary.totalHadir}</strong>
+          </span>
+          <span class="badge badge-terlambat" style="font-size: 0.78rem; padding: 4px 10px;">
+            <i class="fas fa-clock"></i> Terlambat: <strong>${summary.totalTerlambat}</strong>
+          </span>
+          <span class="badge badge-sakit" style="font-size: 0.78rem; padding: 4px 10px;">
+            <i class="fas fa-notes-medical"></i> Sakit: <strong>${summary.totalSakit}</strong>
+          </span>
+          <span class="badge badge-izin" style="font-size: 0.78rem; padding: 4px 10px;">
+            <i class="fas fa-envelope-open-text"></i> Izin: <strong>${summary.totalIzin}</strong>
+          </span>
+          <span class="badge badge-alpa" style="font-size: 0.78rem; padding: 4px 10px;">
+            <i class="fas fa-times-circle"></i> Alpa: <strong>${summary.totalAlpa}</strong>
+          </span>
+          <span class="badge badge-bolos" style="font-size: 0.78rem; padding: 4px 10px;">
+            <i class="fas fa-person-running"></i> Bolos: <strong>${summary.totalBolos}</strong>
+          </span>
+          ${summary.totalBelumDiabsen > 0 ? `
+            <span class="badge badge-secondary" style="font-size: 0.78rem; padding: 4px 10px; background: rgba(100,116,139,0.15); color: #64748b;">
+              Belum Diabsen: <strong>${summary.totalBelumDiabsen}</strong>
+            </span>
+          ` : ''}
+        </div>
+      </div>
+    </div>
+
+    <!-- Section 1: Rekapitulasi Kehadiran Seluruh Rombel / Kelas -->
+    <div class="card" style="margin-bottom: 24px;">
+      <div class="card-header" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+        <div style="display: flex; align-items: center; gap: 10px;">
+          <div style="width: 32px; height: 32px; border-radius: 8px; background: rgba(14,165,233,0.12); display: flex; align-items: center; justify-content: center; color: #0284c7;">
+            <i class="fas fa-table-list"></i>
+          </div>
+          <div>
+            <h3 class="card-title" style="margin: 0; font-size: 1.05rem;">Rekapitulasi Kehadiran Seluruh Rombongan Belajar (Kelas)</h3>
+            <div style="font-size: 0.78rem; color: var(--text-muted);">Perbandingan kehadiran siswa per kelas berdasarkan input guru mata pelajaran</div>
+          </div>
+        </div>
+        <div style="display: flex; gap: 6px;">
+          <button type="button" class="btn btn-secondary btn-sm" onclick="navigate('rekap_kelas_piket')">
+            <i class="fas fa-expand-alt"></i> Tinjauan Lengkap Rombel
+          </button>
+        </div>
+      </div>
+
+      <div class="table-responsive" style="margin-top: 10px;">
+        <table class="table" style="width: 100%; border-collapse: collapse; font-size: 0.88rem;">
+          <thead>
+            <tr style="background: rgba(0,0,0,0.02); border-bottom: 2px solid var(--border-color);">
+              <th style="width: 40px; text-align: center;">No</th>
+              <th>Kelas</th>
+              <th>Wali Kelas</th>
+              <th style="text-align: center; width: 70px;">Siswa</th>
+              <th style="text-align: center; width: 60px; color:#059669;">Hadir</th>
+              <th style="text-align: center; width: 60px; color:#d97706;">Lambat</th>
+              <th style="text-align: center; width: 55px; color:#2563eb;">S</th>
+              <th style="text-align: center; width: 55px; color:#7c3aed;">I</th>
+              <th style="text-align: center; width: 55px; color:#dc2626;">A</th>
+              <th style="text-align: center; width: 55px; color:#ea580c;">B</th>
+              <th style="text-align: center; width: 120px;">% Kehadiran</th>
+              <th style="text-align: center; width: 110px;">Status Rombel</th>
+              <th style="text-align: center; width: 90px;">Aksi</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${summary.classSummaries.length === 0 ? `
+              <tr><td colspan="13" style="text-align:center; padding:30px; color:var(--text-muted);">Belum ada data kelas terdaftar.</td></tr>
+            ` : summary.classSummaries.map((cs, idx) => {
+              const k = cs.kelas;
+              const persenBadgeColor = cs.persen >= 90 ? "#059669" : (cs.persen >= 75 ? "#d97706" : "#dc2626");
+              return `
+                <tr style="border-bottom: 1px solid var(--border-color); vertical-align: middle;">
+                  <td style="text-align: center; font-weight: 600; color: var(--text-muted);">${idx + 1}</td>
+                  <td>
+                    <strong>${escapeHtml(k.nama)}</strong>
+                    ${k.tingkat ? `<span style="font-size: 0.72rem; color: var(--text-muted); display: block;">Tingkat ${escapeHtml(k.tingkat)}</span>` : ''}
+                  </td>
+                  <td>
+                    <span style="font-size: 0.82rem; color: var(--text-secondary);">
+                      <i class="fas fa-user-tie" style="font-size: 0.75rem; color: var(--text-muted);"></i> ${escapeHtml(k.waliKelas || '-')}
+                    </span>
+                  </td>
+                  <td style="text-align: center; font-weight: 700;">${cs.totalSiswa}</td>
+                  <td style="text-align: center; font-weight: 600; color:#059669;">${cs.hadir}</td>
+                  <td style="text-align: center; font-weight: 600; color:#d97706;">${cs.terlambat}</td>
+                  <td style="text-align: center; color:#2563eb;">${cs.sakit}</td>
+                  <td style="text-align: center; color:#7c3aed;">${cs.izin}</td>
+                  <td style="text-align: center; font-weight: 700; color:#dc2626;">${cs.alpa}</td>
+                  <td style="text-align: center; font-weight: 700; color:#ea580c;">${cs.bolos}</td>
+                  <td style="text-align: center;">
+                    <div style="display: flex; align-items: center; justify-content: center; gap: 8px;">
+                      <div style="flex: 1; background: rgba(0,0,0,0.06); height: 6px; border-radius: 3px; overflow: hidden; min-width: 50px;">
+                        <div style="background: ${persenBadgeColor}; width: ${cs.persen}%; height: 100%;"></div>
+                      </div>
+                      <span style="font-weight: 700; color: ${persenBadgeColor}; font-size: 0.82rem; min-width: 34px;">${cs.persen}%</span>
+                    </div>
+                  </td>
+                  <td style="text-align: center;">
+                    ${cs.isTerabsen ? `
+                      <span class="badge badge-hadir" style="font-size: 0.72rem; padding: 2px 7px;">
+                        <i class="fas fa-check-circle"></i> Terabsen
+                      </span>
+                    ` : `
+                      <span class="badge badge-secondary" style="font-size: 0.72rem; padding: 2px 7px; background: rgba(100,116,139,0.15); color: #64748b;">
+                        Belum Diabsen
+                      </span>
+                    `}
+                  </td>
+                  <td style="text-align: center;">
+                    <button type="button" class="btn btn-sm btn-outline-primary" onclick="openModalDetailKelasPiket('${k.id}')" title="Buka Rincian Siswa Kelas ${escapeHtml(k.nama)}" style="padding: 3px 8px; font-size: 0.76rem;">
+                      <i class="fas fa-users"></i> Siswa
+                    </button>
+                  </td>
+                </tr>
+              `;
+            }).join("")}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Section 2: Radar Siswa Tidak Hadir & Terlambat Hari Ini -->
+    <div class="card" style="margin-bottom: 24px;">
+      <div class="card-header" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+        <div style="display: flex; align-items: center; gap: 10px;">
+          <div style="width: 32px; height: 32px; border-radius: 8px; background: rgba(239,68,68,0.12); display: flex; align-items: center; justify-content: center; color: #ef4444;">
+            <i class="fas fa-radar"></i>
+          </div>
+          <div>
+            <h3 class="card-title" style="margin: 0; font-size: 1.05rem;">Radar Siswa Tidak Hadir & Terlambat Hari Ini</h3>
+            <div style="font-size: 0.78rem; color: var(--text-muted);">Daftar siswa yang memerlukan atensi atau konfirmasi kehadiran dari Guru Piket</div>
+          </div>
+        </div>
+        <div>
+          <button type="button" class="btn btn-secondary btn-sm" onclick="navigate('radar_piket')">
+            <i class="fas fa-search"></i> Buka Radar Lengkap (${summary.radarStudents.length})
+          </button>
+        </div>
+      </div>
+
+      ${summary.radarStudents.length === 0 ? `
+        <div style="text-align: center; padding: 36px 15px; color: var(--text-muted);">
+          <div style="width: 50px; height: 50px; border-radius: 50%; background: rgba(16,185,129,0.12); color: #10b981; display: flex; align-items: center; justify-content: center; font-size: 1.4rem; margin: 0 auto 12px;">
+            <i class="fas fa-check-circle"></i>
+          </div>
+          <h4 style="margin: 0 0 4px; font-size: 1rem; color: var(--text-primary);">Alhamdulillah, Seluruh Siswa Terdata Hadir</h4>
+          <p style="margin: 0; font-size: 0.82rem;">Tidak ada siswa yang tercatat Sakit, Izin, Alpa, Bolos, atau Terlambat pada tanggal ini.</p>
+        </div>
+      ` : `
+        <div class="table-responsive" style="margin-top: 10px;">
+          <table class="table" style="width: 100%; border-collapse: collapse; font-size: 0.88rem;">
+            <thead>
+              <tr style="background: rgba(0,0,0,0.02); border-bottom: 2px solid var(--border-color);">
+                <th style="width: 40px; text-align: center;">No</th>
+                <th>Nama Siswa</th>
+                <th>Kelas</th>
+                <th style="text-align: center; width: 100px;">Status</th>
+                <th>Wali Kelas</th>
+                <th>Kontak Orang Tua</th>
+                <th style="text-align: center; width: 120px;">Tindak Lanjut Piket</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${summary.radarStudents.slice(0, 15).map((item, idx) => {
+                const s = item.siswa;
+                const contact = getStudentParentContact(s.id);
+                let badgeClass = "badge-alpa";
+                if (item.status === "Sakit") badgeClass = "badge-sakit";
+                else if (item.status === "Izin") badgeClass = "badge-izin";
+                else if (item.status === "Terlambat") badgeClass = "badge-terlambat";
+                else if (item.status === "Bolos") badgeClass = "badge-bolos";
+
+                return `
+                  <tr style="border-bottom: 1px solid var(--border-color); vertical-align: middle;">
+                    <td style="text-align: center; font-weight: 600; color: var(--text-muted);">${idx + 1}</td>
+                    <td>
+                      <strong>${escapeHtml(s.nama)}</strong>
+                      <span style="font-size: 0.72rem; color: var(--text-muted); display: block;">NISN: ${escapeHtml(s.nisn || '-')}</span>
+                    </td>
+                    <td>
+                      <span class="badge" style="background: rgba(14,165,233,0.1); color: #0284c7; font-weight: 600;">
+                        ${escapeHtml(item.kelas.nama)}
+                      </span>
+                    </td>
+                    <td style="text-align: center;">
+                      <span class="badge ${badgeClass}" style="font-size: 0.78rem; padding: 3px 8px;">
+                        ${item.status}
+                      </span>
+                    </td>
+                    <td>
+                      <span style="font-size: 0.82rem; color: var(--text-secondary);">
+                        ${escapeHtml(item.kelas.waliKelas || '-')}
+                      </span>
+                    </td>
+                    <td>
+                      <div style="font-size: 0.82rem;">
+                        <strong>${escapeHtml(contact.namaWali)}</strong>
+                        <div style="font-size: 0.75rem; color: var(--text-muted);">
+                          ${contact.hasPhone ? contact.noHp : '<em style="color:#ef4444;">No HP belum ada</em>'}
+                        </div>
+                      </div>
+                    </td>
+                    <td style="text-align: center;">
+                      ${contact.hasPhone ? `
+                        <button type="button" class="btn btn-sm btn-outline-success" onclick="sendPiketAlertWA('${s.id}', '${item.status}', '${item.kelas.nama}')" title="Kirim konfirmasi piket ke WhatsApp Orang Tua" style="padding: 4px 8px; font-size: 0.75rem; white-space: nowrap;">
+                          <i class="fab fa-whatsapp"></i> Chat WA
+                        </button>
+                      ` : `
+                        <button type="button" class="btn btn-sm btn-secondary" onclick="navigate('kontak')" title="Lengkapi kontak wali" style="padding: 4px 8px; font-size: 0.72rem;">
+                          Isi Kontak
+                        </button>
+                      `}
+                    </td>
+                  </tr>
+                `;
+              }).join("")}
+            </tbody>
+          </table>
+          ${summary.radarStudents.length > 15 ? `
+            <div style="text-align:center; padding: 10px; border-top: 1px dashed var(--border-color);">
+              <button type="button" class="btn btn-link btn-sm" onclick="navigate('radar_piket')">
+                Lihat Semua ${summary.radarStudents.length} Siswa di Radar Lengkap &rarr;
+              </button>
+            </div>
+          ` : ''}
+        </div>
+      `}
+    </div>
+
+    <!-- Section 3: Jurnal Kejadian & Disiplin Piket Hari Ini -->
+    <div class="card" style="margin-bottom: 24px;">
+      <div class="card-header" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+        <div style="display: flex; align-items: center; gap: 10px;">
+          <div style="width: 32px; height: 32px; border-radius: 8px; background: rgba(245,158,11,0.12); display: flex; align-items: center; justify-content: center; color: #d97706;">
+            <i class="fas fa-book-journal-whills"></i>
+          </div>
+          <div>
+            <h3 class="card-title" style="margin: 0; font-size: 1.05rem;">Buku Catatan Kejadian / Jurnal Piket Harian</h3>
+            <div style="font-size: 0.78rem; color: var(--text-muted);">Pencatatan kejadian khusus, izin keluar sekolah, pelanggaran gerbang, dan laporan piket</div>
+          </div>
+        </div>
+        <div style="display: flex; gap: 6px;">
+          <button type="button" class="btn btn-outline-secondary btn-sm" onclick="printJurnalPiketOnly()" title="Cetak Jurnal Catatan Piket">
+            <i class="fas fa-print"></i> Cetak Jurnal
+          </button>
+          <button type="button" class="btn btn-primary btn-sm" onclick="openModalKejadianPiket()" title="Tambah catatan kejadian baru">
+            <i class="fas fa-plus"></i> + Tambah Catatan
+          </button>
+        </div>
+      </div>
+
+      ${dutyNotes.length === 0 ? `
+        <div style="text-align: center; padding: 32px 15px; color: var(--text-muted);">
+          <i class="fas fa-clipboard-list" style="font-size: 2rem; color: #cbd5e1; margin-bottom: 8px; display: block;"></i>
+          <p style="margin: 0 0 10px; font-size: 0.88rem;">Belum ada catatan kejadian khusus atau pembinaan piket pada hari ini.</p>
+          <button type="button" class="btn btn-secondary btn-sm" onclick="openModalKejadianPiket()">
+            <i class="fas fa-plus"></i> Catat Kejadian Pertama
+          </button>
+        </div>
+      ` : `
+        <div class="table-responsive" style="margin-top: 10px;">
+          <table class="table" style="width: 100%; border-collapse: collapse; font-size: 0.88rem;">
+            <thead>
+              <tr style="background: rgba(0,0,0,0.02); border-bottom: 2px solid var(--border-color);">
+                <th style="width: 70px; text-align: center;">Waktu</th>
+                <th style="width: 130px;">Kategori</th>
+                <th>Judul & Uraian Kejadian</th>
+                <th style="width: 140px;">Siswa / Kelas</th>
+                <th>Tindak Lanjut & Pembinaan</th>
+                <th style="width: 90px; text-align: center;">Status</th>
+                <th style="width: 80px; text-align: center;">Aksi</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${dutyNotes.map(item => `
+                <tr style="border-bottom: 1px solid var(--border-color); vertical-align: top;">
+                  <td style="text-align: center; font-weight: 700; color: #0284c7;">
+                    ${escapeHtml(item.waktu || '-')}
+                  </td>
+                  <td>
+                    <span class="badge" style="background: rgba(14,165,233,0.1); color: #0284c7; font-size: 0.72rem; padding: 2px 6px;">
+                      ${escapeHtml(item.tipe || 'Kejadian')}
+                    </span>
+                  </td>
+                  <td>
+                    <strong>${escapeHtml(item.judul || '-')}</strong>
+                    <p style="margin: 4px 0 0; font-size: 0.8rem; color: var(--text-secondary); line-height: 1.4;">
+                      ${escapeHtml(item.uraian || '-')}
+                    </p>
+                  </td>
+                  <td>
+                    <span style="font-size: 0.82rem; color: var(--text-primary); font-weight: 500;">
+                      ${escapeHtml(item.siswaInfo || '-')}
+                    </span>
+                  </td>
+                  <td>
+                    <p style="margin: 0; font-size: 0.8rem; color: var(--text-secondary); line-height: 1.4;">
+                      ${escapeHtml(item.tindakLanjut || '-')}
+                    </p>
+                    <span style="font-size: 0.72rem; color: var(--text-muted); display: block; margin-top: 2px;">
+                      Petugas: ${escapeHtml(item.petugas || teacherName)}
+                    </span>
+                  </td>
+                  <td style="text-align: center;">
+                    <span class="badge ${item.status === 'Selesai' ? 'badge-hadir' : 'badge-izin'}" style="font-size: 0.72rem; padding: 2px 6px;">
+                      ${escapeHtml(item.status || 'Selesai')}
+                    </span>
+                  </td>
+                  <td style="text-align: center;">
+                    <div style="display: flex; gap: 4px; justify-content: center;">
+                      <button type="button" class="btn btn-sm btn-secondary" onclick="openModalKejadianPiket('${item.id}')" title="Edit" style="padding: 2px 6px; font-size: 0.72rem;">
+                        <i class="fas fa-edit"></i>
+                      </button>
+                      <button type="button" class="btn btn-sm btn-danger" onclick="deleteKejadianPiket('${item.id}')" title="Hapus" style="padding: 2px 6px; font-size: 0.72rem;">
+                        <i class="fas fa-trash"></i>
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        </div>
+      `}
+    </div>
+  `;
+}
+
+// ----------------------------------------------------------------------------
+// HALAMAN 2: REKAP KELAS PIKET (Per-Class Comparison)
+// ----------------------------------------------------------------------------
+function renderRekapKelasPiket(container) {
+  container = container || document.getElementById("content-container") || document.getElementById("content-area");
+  if (!container) return;
+
+  const summary = getPiketAttendanceSummary(currentPiketDate);
+  const todayStr = getLocalDateString();
+  const isToday = currentPiketDate === todayStr;
+
+  let filteredClasses = [...summary.classSummaries];
+  if (currentPiketTingkatFilter !== "all") {
+    filteredClasses = filteredClasses.filter(c => (c.kelas.tingkat || "").toLowerCase().includes(currentPiketTingkatFilter.toLowerCase()) || (c.kelas.nama || "").toLowerCase().includes(currentPiketTingkatFilter.toLowerCase()));
+  }
+
+  if (currentPiketSortBy === "persen_asc") {
+    filteredClasses.sort((a, b) => a.persen - b.persen);
+  } else if (currentPiketSortBy === "persen_desc") {
+    filteredClasses.sort((a, b) => b.persen - a.persen);
+  } else if (currentPiketSortBy === "nama_asc") {
+    filteredClasses.sort((a, b) => (a.kelas.nama || "").localeCompare(b.kelas.nama || "", undefined, { numeric: true }));
+  } else if (currentPiketSortBy === "alpa_desc") {
+    filteredClasses.sort((a, b) => (b.alpa + b.bolos) - (a.alpa + a.bolos));
+  }
+
+  container.innerHTML = `
+    <!-- Top Toolbar -->
+    <div class="card" style="margin-bottom: 20px; border-top: 4px solid #0284c7;">
+      <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 14px;">
+        <div>
+          <h3 style="margin: 0; font-size: 1.15rem; font-weight: 700; color: var(--text-primary);">
+            <i class="fas fa-clipboard-check" style="color: #0284c7;"></i> Tinjauan Presensi Seluruh Rombongan Belajar
+          </h3>
+          <div style="font-size: 0.82rem; color: var(--text-muted); margin-top: 2px;">
+            Hari & Tanggal: <strong>${formatDateIndoFull(currentPiketDate)}</strong> &bull; Rata-rata Sekolah: <strong>${summary.persenKehadiranSekolah}%</strong>
+          </div>
+        </div>
+
+        <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+          <div style="display: flex; align-items: center; gap: 6px; background: rgba(0,0,0,0.03); padding: 4px 8px; border-radius: 8px; border: 1px solid var(--border-color);">
+            <label for="rekap-piket-date" style="font-size: 0.78rem; font-weight: 700; margin: 0;">
+              Tanggal:
+            </label>
+            <input type="date" id="rekap-piket-date" class="form-control" style="font-size: 0.85rem; padding: 4px 8px; width: 145px;" value="${currentPiketDate}" onchange="changePiketDate(this.value)">
+            ${!isToday ? `
+              <button type="button" class="btn btn-secondary btn-sm" onclick="changePiketDate('${todayStr}')" style="font-size: 0.75rem; padding: 4px 8px;">
+                Hari Ini
+              </button>
+            ` : ''}
+          </div>
+
+          <button type="button" class="btn btn-secondary btn-sm" onclick="printLaporanPiketHarian()">
+            <i class="fas fa-print"></i> Cetak Rekap
+          </button>
+          <button type="button" class="btn btn-primary btn-sm" onclick="exportPiketHarianCSV()">
+            <i class="fas fa-file-csv"></i> Ekspor CSV
+          </button>
+        </div>
+      </div>
+
+      <!-- Filters & Sorting -->
+      <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-top: 14px; padding-top: 12px; border-top: 1px dashed var(--border-color);">
+        <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
+          <span style="font-size: 0.8rem; font-weight: 600; color: var(--text-muted);">Tingkat:</span>
+          <div class="btn-group" style="display:flex; gap:4px;">
+            <button type="button" class="btn btn-sm ${currentPiketTingkatFilter === 'all' ? 'btn-primary' : 'btn-secondary'}" onclick="currentPiketTingkatFilter='all'; renderRekapKelasPiket();" style="padding: 3px 8px; font-size: 0.76rem;">Semua</button>
+            <button type="button" class="btn btn-sm ${currentPiketTingkatFilter === 'X' ? 'btn-primary' : 'btn-secondary'}" onclick="currentPiketTingkatFilter='X'; renderRekapKelasPiket();" style="padding: 3px 8px; font-size: 0.76rem;">Kelas X</button>
+            <button type="button" class="btn btn-sm ${currentPiketTingkatFilter === 'XI' ? 'btn-primary' : 'btn-secondary'}" onclick="currentPiketTingkatFilter='XI'; renderRekapKelasPiket();" style="padding: 3px 8px; font-size: 0.76rem;">Kelas XI</button>
+            <button type="button" class="btn btn-sm ${currentPiketTingkatFilter === 'XII' ? 'btn-primary' : 'btn-secondary'}" onclick="currentPiketTingkatFilter='XII'; renderRekapKelasPiket();" style="padding: 3px 8px; font-size: 0.76rem;">Kelas XII</button>
+          </div>
+        </div>
+
+        <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+          <span style="font-size: 0.8rem; font-weight: 600; color: var(--text-muted);">Urutkan:</span>
+          <select class="form-control" style="font-size: 0.82rem; padding: 4px 8px; width: auto;" onchange="currentPiketSortBy = this.value; renderRekapKelasPiket();">
+            <option value="persen_asc" ${currentPiketSortBy === 'persen_asc' ? 'selected' : ''}>Kehadiran Terendah (Prioritas Piket)</option>
+            <option value="persen_desc" ${currentPiketSortBy === 'persen_desc' ? 'selected' : ''}>Kehadiran Tertinggi</option>
+            <option value="alpa_desc" ${currentPiketSortBy === 'alpa_desc' ? 'selected' : ''}>Alpa & Bolos Terbanyak</option>
+            <option value="nama_asc" ${currentPiketSortBy === 'nama_asc' ? 'selected' : ''}>Nama Kelas (A-Z)</option>
+          </select>
+
+          <div style="position: relative; width: 180px;">
+            <input type="text" id="search-rekap-kelas" class="form-control" placeholder="Cari nama kelas..." style="padding: 4px 8px 4px 28px; font-size: 0.82rem;" oninput="filterPiketClassTable(this.value)">
+            <i class="fas fa-search" style="position: absolute; left: 9px; top: 50%; transform: translateY(-50%); font-size: 0.75rem; color: var(--text-muted);"></i>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Table of Classes -->
+    <div class="card">
+      <div class="table-responsive">
+        <table class="table" id="table-rekap-kelas-piket" style="width: 100%; border-collapse: collapse; font-size: 0.88rem;">
+          <thead>
+            <tr style="background: rgba(0,0,0,0.02); border-bottom: 2px solid var(--border-color);">
+              <th style="width: 40px; text-align: center;">No</th>
+              <th>Nama Kelas</th>
+              <th>Wali Kelas</th>
+              <th style="text-align: center; width: 70px;">Siswa</th>
+              <th style="text-align: center; width: 60px; color:#059669;">Hadir</th>
+              <th style="text-align: center; width: 60px; color:#d97706;">Lambat</th>
+              <th style="text-align: center; width: 55px; color:#2563eb;">S</th>
+              <th style="text-align: center; width: 55px; color:#7c3aed;">I</th>
+              <th style="text-align: center; width: 55px; color:#dc2626;">A</th>
+              <th style="text-align: center; width: 55px; color:#ea580c;">B</th>
+              <th style="text-align: center; width: 140px;">% Kehadiran</th>
+              <th style="text-align: center; width: 110px;">Status</th>
+              <th style="text-align: center; width: 100px;">Aksi</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${filteredClasses.length === 0 ? `
+              <tr><td colspan="13" style="text-align:center; padding:30px; color:var(--text-muted);">Tidak ada kelas yang sesuai dengan filter.</td></tr>
+            ` : filteredClasses.map((cs, idx) => {
+              const k = cs.kelas;
+              const persenBadgeColor = cs.persen >= 90 ? "#059669" : (cs.persen >= 75 ? "#d97706" : "#dc2626");
+              return `
+                <tr class="row-piket-kelas" data-nama="${escapeHtml(k.nama).toLowerCase()}" style="border-bottom: 1px solid var(--border-color); vertical-align: middle;">
+                  <td style="text-align: center; font-weight: 600; color: var(--text-muted);">${idx + 1}</td>
+                  <td>
+                    <strong>${escapeHtml(k.nama)}</strong>
+                    ${k.tingkat ? `<span style="font-size: 0.72rem; color: var(--text-muted); display: block;">Tingkat ${escapeHtml(k.tingkat)}</span>` : ''}
+                  </td>
+                  <td>
+                    <span style="font-size: 0.82rem; color: var(--text-secondary);">
+                      <i class="fas fa-user-tie" style="font-size: 0.75rem; color: var(--text-muted);"></i> ${escapeHtml(k.waliKelas || '-')}
+                    </span>
+                  </td>
+                  <td style="text-align: center; font-weight: 700;">${cs.totalSiswa}</td>
+                  <td style="text-align: center; font-weight: 600; color:#059669;">${cs.hadir}</td>
+                  <td style="text-align: center; font-weight: 600; color:#d97706;">${cs.terlambat}</td>
+                  <td style="text-align: center; color:#2563eb;">${cs.sakit}</td>
+                  <td style="text-align: center; color:#7c3aed;">${cs.izin}</td>
+                  <td style="text-align: center; font-weight: 700; color:#dc2626;">${cs.alpa}</td>
+                  <td style="text-align: center; font-weight: 700; color:#ea580c;">${cs.bolos}</td>
+                  <td style="text-align: center;">
+                    <div style="display: flex; align-items: center; justify-content: center; gap: 8px;">
+                      <div style="flex: 1; background: rgba(0,0,0,0.06); height: 6px; border-radius: 3px; overflow: hidden; min-width: 50px;">
+                        <div style="background: ${persenBadgeColor}; width: ${cs.persen}%; height: 100%;"></div>
+                      </div>
+                      <span style="font-weight: 700; color: ${persenBadgeColor}; font-size: 0.82rem; min-width: 34px;">${cs.persen}%</span>
+                    </div>
+                  </td>
+                  <td style="text-align: center;">
+                    ${cs.isTerabsen ? `
+                      <span class="badge badge-hadir" style="font-size: 0.72rem; padding: 2px 7px;">
+                        <i class="fas fa-check-circle"></i> Terabsen
+                      </span>
+                    ` : `
+                      <span class="badge badge-secondary" style="font-size: 0.72rem; padding: 2px 7px; background: rgba(100,116,139,0.15); color: #64748b;">
+                        Belum Diabsen
+                      </span>
+                    `}
+                  </td>
+                  <td style="text-align: center;">
+                    <button type="button" class="btn btn-sm btn-outline-primary" onclick="openModalDetailKelasPiket('${k.id}')" title="Buka Detail Siswa" style="padding: 4px 8px; font-size: 0.76rem;">
+                      <i class="fas fa-eye"></i> Detail
+                    </button>
+                  </td>
+                </tr>
+              `;
+            }).join("")}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function filterPiketClassTable(query) {
+  const q = (query || "").toLowerCase().trim();
+  document.querySelectorAll("#table-rekap-kelas-piket .row-piket-kelas").forEach(row => {
+    const name = row.getAttribute("data-nama") || "";
+    row.style.display = (!q || name.includes(q)) ? "" : "none";
+  });
+}
+
+// ----------------------------------------------------------------------------
+// HALAMAN 3: RADAR KETIDAKHADIRAN & KETERLAMBATAN (School-Wide Radar)
+// ----------------------------------------------------------------------------
+function renderRadarPiket(container) {
+  container = container || document.getElementById("content-container") || document.getElementById("content-area");
+  if (!container) return;
+
+  const summary = getPiketAttendanceSummary(currentPiketDate);
+  const todayStr = getLocalDateString();
+  const isToday = currentPiketDate === todayStr;
+
+  let filteredStudents = [...summary.radarStudents];
+  if (currentPiketRadarTab === "alpa_bolos") {
+    filteredStudents = filteredStudents.filter(r => r.status === "Alpa" || r.status === "Bolos");
+  } else if (currentPiketRadarTab === "terlambat") {
+    filteredStudents = filteredStudents.filter(r => r.status === "Terlambat");
+  } else if (currentPiketRadarTab === "sakit") {
+    filteredStudents = filteredStudents.filter(r => r.status === "Sakit");
+  } else if (currentPiketRadarTab === "izin") {
+    filteredStudents = filteredStudents.filter(r => r.status === "Izin");
+  }
+
+  const alpaBolosCount = summary.radarStudents.filter(r => r.status === "Alpa" || r.status === "Bolos").length;
+  const terlambatCount = summary.radarStudents.filter(r => r.status === "Terlambat").length;
+  const sakitCount = summary.radarStudents.filter(r => r.status === "Sakit").length;
+  const izinCount = summary.radarStudents.filter(r => r.status === "Izin").length;
+
+  container.innerHTML = `
+    <!-- Top Toolbar -->
+    <div class="card" style="margin-bottom: 20px; border-top: 4px solid #ef4444;">
+      <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 14px;">
+        <div>
+          <h3 style="margin: 0; font-size: 1.15rem; font-weight: 700; color: var(--text-primary);">
+            <i class="fas fa-radar" style="color: #ef4444;"></i> Radar Ketidakhadiran & Keterlambatan Seluruh Siswa
+          </h3>
+          <div style="font-size: 0.82rem; color: var(--text-muted); margin-top: 2px;">
+            Hari & Tanggal: <strong>${formatDateIndoFull(currentPiketDate)}</strong> &bull; Total Terdata: <strong>${summary.radarStudents.length} Siswa</strong>
+          </div>
+        </div>
+
+        <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+          <div style="display: flex; align-items: center; gap: 6px; background: rgba(0,0,0,0.03); padding: 4px 8px; border-radius: 8px; border: 1px solid var(--border-color);">
+            <label for="radar-piket-date" style="font-size: 0.78rem; font-weight: 700; margin: 0;">
+              Tanggal:
+            </label>
+            <input type="date" id="radar-piket-date" class="form-control" style="font-size: 0.85rem; padding: 4px 8px; width: 145px;" value="${currentPiketDate}" onchange="changePiketDate(this.value)">
+            ${!isToday ? `
+              <button type="button" class="btn btn-secondary btn-sm" onclick="changePiketDate('${todayStr}')" style="font-size: 0.75rem; padding: 4px 8px;">
+                Hari Ini
+              </button>
+            ` : ''}
+          </div>
+
+          <button type="button" class="btn btn-secondary btn-sm" onclick="printLaporanPiketHarian()">
+            <i class="fas fa-print"></i> Cetak Laporan
+          </button>
+        </div>
+      </div>
+
+      <!-- Filter Tabs -->
+      <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-top: 14px; padding-top: 12px; border-top: 1px dashed var(--border-color);">
+        <div style="display: flex; gap: 6px; flex-wrap: wrap;">
+          <button type="button" class="btn btn-sm ${currentPiketRadarTab === 'all' ? 'btn-primary' : 'btn-secondary'}" onclick="currentPiketRadarTab='all'; renderRadarPiket();" style="padding: 4px 10px; font-size: 0.78rem;">
+            Semua (${summary.radarStudents.length})
+          </button>
+          <button type="button" class="btn btn-sm ${currentPiketRadarTab === 'alpa_bolos' ? 'btn-danger' : 'btn-secondary'}" onclick="currentPiketRadarTab='alpa_bolos'; renderRadarPiket();" style="padding: 4px 10px; font-size: 0.78rem;">
+            <i class="fas fa-exclamation-triangle"></i> Alpa & Bolos (${alpaBolosCount})
+          </button>
+          <button type="button" class="btn btn-sm ${currentPiketRadarTab === 'terlambat' ? 'btn-warning' : 'btn-secondary'}" onclick="currentPiketRadarTab='terlambat'; renderRadarPiket();" style="padding: 4px 10px; font-size: 0.78rem;">
+            <i class="fas fa-clock"></i> Terlambat (${terlambatCount})
+          </button>
+          <button type="button" class="btn btn-sm ${currentPiketRadarTab === 'sakit' ? 'btn-info' : 'btn-secondary'}" onclick="currentPiketRadarTab='sakit'; renderRadarPiket();" style="padding: 4px 10px; font-size: 0.78rem;">
+            <i class="fas fa-notes-medical"></i> Sakit (${sakitCount})
+          </button>
+          <button type="button" class="btn btn-sm ${currentPiketRadarTab === 'izin' ? 'btn-secondary' : 'btn-secondary'}" onclick="currentPiketRadarTab='izin'; renderRadarPiket();" style="padding: 4px 10px; font-size: 0.78rem;">
+            <i class="fas fa-envelope-open-text"></i> Izin (${izinCount})
+          </button>
+        </div>
+
+        <div style="position: relative; width: 220px;">
+          <input type="text" id="search-radar-siswa" class="form-control" placeholder="Cari nama siswa / kelas..." style="padding: 4px 8px 4px 28px; font-size: 0.82rem;" oninput="filterPiketRadarTable(this.value)">
+          <i class="fas fa-search" style="position: absolute; left: 9px; top: 50%; transform: translateY(-50%); font-size: 0.75rem; color: var(--text-muted);"></i>
+        </div>
+      </div>
+    </div>
+
+    <!-- Table of Radar Students -->
+    <div class="card">
+      ${filteredStudents.length === 0 ? `
+        <div style="text-align: center; padding: 40px 15px; color: var(--text-muted);">
+          <div style="width: 48px; height: 48px; border-radius: 50%; background: rgba(16,185,129,0.12); color: #10b981; display: flex; align-items: center; justify-content: center; font-size: 1.3rem; margin: 0 auto 10px;">
+            <i class="fas fa-check"></i>
+          </div>
+          <h4 style="margin: 0 0 4px; font-size: 0.95rem; color: var(--text-primary);">Tidak Ada Siswa Pada Kategori Ini</h4>
+          <p style="margin: 0; font-size: 0.8rem;">Seluruh siswa telah hadir atau tidak memenuhi kriteria filter terpilih.</p>
+        </div>
+      ` : `
+        <div class="table-responsive">
+          <table class="table" id="table-radar-piket" style="width: 100%; border-collapse: collapse; font-size: 0.88rem;">
+            <thead>
+              <tr style="background: rgba(0,0,0,0.02); border-bottom: 2px solid var(--border-color);">
+                <th style="width: 40px; text-align: center;">No</th>
+                <th>Nama Siswa & NISN</th>
+                <th>Kelas</th>
+                <th style="text-align: center; width: 100px;">Status</th>
+                <th>Wali Kelas</th>
+                <th>Kontak Orang Tua / Wali</th>
+                <th style="text-align: center; width: 130px;">Tindak Lanjut Piket</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${filteredStudents.map((item, idx) => {
+                const s = item.siswa;
+                const contact = getStudentParentContact(s.id);
+                let badgeClass = "badge-alpa";
+                if (item.status === "Sakit") badgeClass = "badge-sakit";
+                else if (item.status === "Izin") badgeClass = "badge-izin";
+                else if (item.status === "Terlambat") badgeClass = "badge-terlambat";
+                else if (item.status === "Bolos") badgeClass = "badge-bolos";
+
+                return `
+                  <tr class="row-piket-radar" data-search="${escapeHtml(s.nama).toLowerCase()} ${escapeHtml(item.kelas.nama).toLowerCase()}" style="border-bottom: 1px solid var(--border-color); vertical-align: middle;">
+                    <td style="text-align: center; font-weight: 600; color: var(--text-muted);">${idx + 1}</td>
+                    <td>
+                      <strong>${escapeHtml(s.nama)}</strong>
+                      <span style="font-size: 0.72rem; color: var(--text-muted); display: block;">NISN: ${escapeHtml(s.nisn || '-')}</span>
+                    </td>
+                    <td>
+                      <span class="badge" style="background: rgba(14,165,233,0.1); color: #0284c7; font-weight: 600;">
+                        ${escapeHtml(item.kelas.nama)}
+                      </span>
+                    </td>
+                    <td style="text-align: center;">
+                      <span class="badge ${badgeClass}" style="font-size: 0.78rem; padding: 3px 8px;">
+                        ${item.status}
+                      </span>
+                    </td>
+                    <td>
+                      <span style="font-size: 0.82rem; color: var(--text-secondary);">
+                        <i class="fas fa-user-tie" style="font-size: 0.72rem; color: var(--text-muted);"></i> ${escapeHtml(item.kelas.waliKelas || '-')}
+                      </span>
+                    </td>
+                    <td>
+                      <div style="font-size: 0.82rem;">
+                        <strong>${escapeHtml(contact.namaWali)}</strong>
+                        <div style="font-size: 0.75rem; color: var(--text-muted);">
+                          ${contact.hasPhone ? contact.noHp : '<em style="color:#ef4444;">No HP belum ada</em>'}
+                        </div>
+                      </div>
+                    </td>
+                    <td style="text-align: center;">
+                      ${contact.hasPhone ? `
+                        <button type="button" class="btn btn-sm btn-outline-success" onclick="sendPiketAlertWA('${s.id}', '${item.status}', '${item.kelas.nama}')" title="Kirim konfirmasi piket ke WhatsApp Orang Tua" style="padding: 4px 8px; font-size: 0.75rem; white-space: nowrap;">
+                          <i class="fab fa-whatsapp"></i> Hubungi WA
+                        </button>
+                      ` : `
+                        <button type="button" class="btn btn-sm btn-secondary" onclick="navigate('kontak')" title="Lengkapi data kontak" style="padding: 4px 8px; font-size: 0.72rem;">
+                          Isi Kontak
+                        </button>
+                      `}
+                    </td>
+                  </tr>
+                `;
+              }).join("")}
+            </tbody>
+          </table>
+        </div>
+      `}
+    </div>
+  `;
+}
+
+function filterPiketRadarTable(query) {
+  const q = (query || "").toLowerCase().trim();
+  document.querySelectorAll("#table-radar-piket .row-piket-radar").forEach(row => {
+    const text = row.getAttribute("data-search") || "";
+    row.style.display = (!q || text.includes(q)) ? "" : "none";
+  });
+}
+
+// ----------------------------------------------------------------------------
+// HALAMAN 4: JURNAL & BUKU CATATAN PIKET
+// ----------------------------------------------------------------------------
+function renderJurnalPiket(container) {
+  container = container || document.getElementById("content-container") || document.getElementById("content-area");
+  if (!container) return;
+
+  const userSchool = getCurrentSchoolName();
+  const session = getSession();
+  const teacherName = (session && session.nama) ? session.nama : ((db.guruProfile && db.guruProfile.nama) ? db.guruProfile.nama : "Guru Piket");
+  const todayStr = getLocalDateString();
+  const isToday = currentPiketDate === todayStr;
+
+  const dutyNotes = (db.jurnalPiket || []).filter(j => j.tanggal === currentPiketDate);
+  dutyNotes.sort((a, b) => (b.waktu || "").localeCompare(a.waktu || ""));
+
+  container.innerHTML = `
+    <!-- Top Toolbar -->
+    <div class="card" style="margin-bottom: 20px; border-top: 4px solid #f59e0b;">
+      <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 14px;">
+        <div>
+          <h3 style="margin: 0; font-size: 1.15rem; font-weight: 700; color: var(--text-primary);">
+            <i class="fas fa-book-journal-whills" style="color: #f59e0b;"></i> Buku Catatan Kejadian & Jurnal Piket Harian
+          </h3>
+          <div style="font-size: 0.82rem; color: var(--text-muted); margin-top: 2px;">
+            Hari & Tanggal: <strong>${formatDateIndoFull(currentPiketDate)}</strong> &bull; Total Kejadian: <strong>${dutyNotes.length} Catatan</strong>
+          </div>
+        </div>
+
+        <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+          <div style="display: flex; align-items: center; gap: 6px; background: rgba(0,0,0,0.03); padding: 4px 8px; border-radius: 8px; border: 1px solid var(--border-color);">
+            <label for="jurnal-piket-date" style="font-size: 0.78rem; font-weight: 700; margin: 0;">
+              Tanggal:
+            </label>
+            <input type="date" id="jurnal-piket-date" class="form-control" style="font-size: 0.85rem; padding: 4px 8px; width: 145px;" value="${currentPiketDate}" onchange="changePiketDate(this.value)">
+            ${!isToday ? `
+              <button type="button" class="btn btn-secondary btn-sm" onclick="changePiketDate('${todayStr}')" style="font-size: 0.75rem; padding: 4px 8px;">
+                Hari Ini
+              </button>
+            ` : ''}
+          </div>
+
+          <button type="button" class="btn btn-secondary btn-sm" onclick="printJurnalPiketOnly()">
+            <i class="fas fa-print"></i> Cetak Jurnal
+          </button>
+          <button type="button" class="btn btn-primary btn-sm" onclick="openModalKejadianPiket()">
+            <i class="fas fa-plus"></i> + Tambah Catatan
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Table of Duty Journal Notes -->
+    <div class="card">
+      ${dutyNotes.length === 0 ? `
+        <div style="text-align: center; padding: 44px 15px; color: var(--text-muted);">
+          <div style="width: 50px; height: 50px; border-radius: 50%; background: rgba(245,158,11,0.12); color: #f59e0b; display: flex; align-items: center; justify-content: center; font-size: 1.4rem; margin: 0 auto 12px;">
+            <i class="fas fa-clipboard-list"></i>
+          </div>
+          <h4 style="margin: 0 0 4px; font-size: 1rem; color: var(--text-primary);">Belum Ada Catatan Kejadian Hari Ini</h4>
+          <p style="margin: 0 0 14px; font-size: 0.82rem;">Gunakan tombol di bawah untuk mencatat keterlambatan gerbang, izin keluar, atau tamu sekolah.</p>
+          <button type="button" class="btn btn-primary btn-sm" onclick="openModalKejadianPiket()">
+            <i class="fas fa-plus"></i> + Tambah Catatan Kejadian
+          </button>
+        </div>
+      ` : `
+        <div class="table-responsive">
+          <table class="table" style="width: 100%; border-collapse: collapse; font-size: 0.88rem;">
+            <thead>
+              <tr style="background: rgba(0,0,0,0.02); border-bottom: 2px solid var(--border-color);">
+                <th style="width: 75px; text-align: center;">Waktu</th>
+                <th style="width: 140px;">Kategori</th>
+                <th>Judul & Uraian Kejadian</th>
+                <th style="width: 150px;">Siswa / Kelas</th>
+                <th>Tindak Lanjut & Pembinaan</th>
+                <th style="width: 90px; text-align: center;">Status</th>
+                <th style="width: 80px; text-align: center;">Aksi</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${dutyNotes.map(item => `
+                <tr style="border-bottom: 1px solid var(--border-color); vertical-align: top;">
+                  <td style="text-align: center; font-weight: 700; color: #0284c7;">
+                    ${escapeHtml(item.waktu || '-')}
+                  </td>
+                  <td>
+                    <span class="badge" style="background: rgba(14,165,233,0.1); color: #0284c7; font-size: 0.72rem; padding: 2px 6px;">
+                      ${escapeHtml(item.tipe || 'Kejadian')}
+                    </span>
+                  </td>
+                  <td>
+                    <strong>${escapeHtml(item.judul || '-')}</strong>
+                    <p style="margin: 4px 0 0; font-size: 0.8rem; color: var(--text-secondary); line-height: 1.4;">
+                      ${escapeHtml(item.uraian || '-')}
+                    </p>
+                  </td>
+                  <td>
+                    <span style="font-size: 0.82rem; color: var(--text-primary); font-weight: 500;">
+                      ${escapeHtml(item.siswaInfo || '-')}
+                    </span>
+                  </td>
+                  <td>
+                    <p style="margin: 0; font-size: 0.8rem; color: var(--text-secondary); line-height: 1.4;">
+                      ${escapeHtml(item.tindakLanjut || '-')}
+                    </p>
+                    <span style="font-size: 0.72rem; color: var(--text-muted); display: block; margin-top: 2px;">
+                      Petugas: ${escapeHtml(item.petugas || teacherName)}
+                    </span>
+                  </td>
+                  <td style="text-align: center;">
+                    <span class="badge ${item.status === 'Selesai' ? 'badge-hadir' : 'badge-izin'}" style="font-size: 0.72rem; padding: 2px 6px;">
+                      ${escapeHtml(item.status || 'Selesai')}
+                    </span>
+                  </td>
+                  <td style="text-align: center;">
+                    <div style="display: flex; gap: 4px; justify-content: center;">
+                      <button type="button" class="btn btn-sm btn-secondary" onclick="openModalKejadianPiket('${item.id}')" title="Edit" style="padding: 2px 6px; font-size: 0.72rem;">
+                        <i class="fas fa-edit"></i>
+                      </button>
+                      <button type="button" class="btn btn-sm btn-danger" onclick="deleteKejadianPiket('${item.id}')" title="Hapus" style="padding: 2px 6px; font-size: 0.72rem;">
+                        <i class="fas fa-trash"></i>
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        </div>
+      `}
+    </div>
+  `;
+}
+
+// ----------------------------------------------------------------------------
+// MODAL: DETAIL SISWA KELAS PIKET
+// ----------------------------------------------------------------------------
+function openModalDetailKelasPiket(kelasId) {
+  const k = (db.kelas || []).find(cls => cls.id === kelasId);
+  if (!k) {
+    showToast("Data kelas tidak ditemukan.");
+    return;
+  }
+
+  const students = (db.siswa || []).filter(s => s.kelasId === kelasId);
+  const classAttendance = (db.absensi || []).filter(a => a.kelasId === kelasId && a.tanggal === currentPiketDate);
+  const mapelsRecorded = [...new Set(classAttendance.map(a => a.mapel).filter(Boolean))];
+
+  let hadir = 0, sakit = 0, izin = 0, alpa = 0, terlambat = 0, bolos = 0, belum = 0;
+
+  const rosterRows = students.map((s, idx) => {
+    const records = classAttendance.filter(a => a.siswaId === s.id);
+    let finalStatus = "Belum Diabsen";
+
+    if (records.length > 0) {
+      const statuses = records.map(r => r.status);
+      if (statuses.includes("Bolos")) finalStatus = "Bolos";
+      else if (statuses.includes("Alpa")) finalStatus = "Alpa";
+      else if (statuses.includes("Sakit")) finalStatus = "Sakit";
+      else if (statuses.includes("Izin")) finalStatus = "Izin";
+      else if (statuses.includes("Terlambat")) finalStatus = "Terlambat";
+      else if (statuses.every(st => st === "Hadir")) finalStatus = "Hadir";
+      else finalStatus = records[0].status || "Hadir";
+    }
+
+    if (finalStatus === "Hadir") hadir++;
+    else if (finalStatus === "Sakit") sakit++;
+    else if (finalStatus === "Izin") izin++;
+    else if (finalStatus === "Alpa") alpa++;
+    else if (finalStatus === "Terlambat") terlambat++;
+    else if (finalStatus === "Bolos") bolos++;
+    else belum++;
+
+    let badgeClass = "badge-hadir";
+    if (finalStatus === "Sakit") badgeClass = "badge-sakit";
+    else if (finalStatus === "Izin") badgeClass = "badge-izin";
+    else if (finalStatus === "Alpa") badgeClass = "badge-alpa";
+    else if (finalStatus === "Terlambat") badgeClass = "badge-terlambat";
+    else if (finalStatus === "Bolos") badgeClass = "badge-bolos";
+    else if (finalStatus === "Belum Diabsen") badgeClass = "badge-secondary";
+
+    const contact = getStudentParentContact(s.id);
+    const mapelDetails = records.map(r => `<span style="font-size:0.72rem; background:rgba(0,0,0,0.05); padding:1px 5px; border-radius:4px;">${escapeHtml(r.mapel)}: <strong>${r.status}</strong></span>`).join(" ");
+
+    return `
+      <tr style="border-bottom: 1px solid var(--border-color); vertical-align: middle;">
+        <td style="text-align: center; color: var(--text-muted); font-weight: 600;">${idx + 1}</td>
+        <td>
+          <strong>${escapeHtml(s.nama)}</strong>
+          <span style="font-size: 0.72rem; color: var(--text-muted); display: block;">NISN: ${escapeHtml(s.nisn || '-')}</span>
+        </td>
+        <td style="text-align: center;">
+          <span class="badge ${badgeClass}" style="font-size: 0.76rem; padding: 3px 8px;">
+            ${finalStatus}
+          </span>
+        </td>
+        <td>
+          ${mapelDetails || '<span style="font-size:0.75rem; color:var(--text-muted);">-</span>'}
+        </td>
+        <td>
+          <div style="font-size: 0.8rem;">
+            ${escapeHtml(contact.namaWali)}
+            ${contact.hasPhone ? `
+              <button type="button" class="btn btn-sm btn-link" onclick="sendPiketAlertWA('${s.id}', '${finalStatus}', '${k.nama}')" style="padding:0; font-size:0.75rem; color:#10b981;">
+                <i class="fab fa-whatsapp"></i> ${contact.noHp}
+              </button>
+            ` : ''}
+          </div>
+        </td>
+      </tr>
+    `;
+  }).join("");
+
+  const bodyHtml = `
+    <div>
+      <div style="background: rgba(14,165,233,0.08); padding: 12px 16px; border-radius: 8px; margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+        <div>
+          <h4 style="margin: 0; font-size: 1rem; color: var(--text-primary);">Kelas ${escapeHtml(k.nama)} &bull; Wali Kelas: ${escapeHtml(k.waliKelas || '-')}</h4>
+          <div style="font-size: 0.8rem; color: var(--text-muted); margin-top: 2px;">
+            Tanggal: <strong>${formatDateIndoFull(currentPiketDate)}</strong> &bull; Total: <strong>${students.length} Siswa</strong>
+          </div>
+        </div>
+        <div style="display: flex; gap: 6px; flex-wrap: wrap;">
+          <span class="badge badge-hadir" style="font-size:0.72rem;">Hadir: ${hadir}</span>
+          <span class="badge badge-terlambat" style="font-size:0.72rem;">Terlambat: ${terlambat}</span>
+          <span class="badge badge-sakit" style="font-size:0.72rem;">S: ${sakit}</span>
+          <span class="badge badge-izin" style="font-size:0.72rem;">I: ${izin}</span>
+          <span class="badge badge-alpa" style="font-size:0.72rem;">A: ${alpa}</span>
+          <span class="badge badge-bolos" style="font-size:0.72rem;">B: ${bolos}</span>
+        </div>
+      </div>
+
+      ${mapelsRecorded.length > 0 ? `
+        <div style="margin-bottom: 12px; font-size: 0.8rem; color: var(--text-secondary);">
+          <i class="fas fa-book-open" style="color: #0284c7;"></i> Guru Mata Pelajaran yang telah mengabsen hari ini: 
+          <strong>${mapelsRecorded.join(", ")}</strong>
+        </div>
+      ` : `
+        <div style="margin-bottom: 12px; font-size: 0.8rem; color: #ef4444;">
+          <i class="fas fa-exclamation-circle"></i> Belum ada mata pelajaran yang menginput absensi kelas ini pada tanggal ini.
+        </div>
+      `}
+
+      <div class="table-responsive" style="max-height: 420px; overflow-y: auto;">
+        <table class="table" style="width: 100%; border-collapse: collapse; font-size: 0.85rem;">
+          <thead>
+            <tr style="background: rgba(0,0,0,0.03); position: sticky; top: 0; z-index: 1;">
+              <th style="width: 35px; text-align: center;">No</th>
+              <th>Nama Siswa</th>
+              <th style="text-align: center; width: 95px;">Status Final</th>
+              <th>Presensi per Mapel</th>
+              <th>Kontak Orang Tua</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rosterRows || '<tr><td colspan="5" style="text-align:center; padding:20px;">Tidak ada siswa dalam kelas ini.</td></tr>'}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+
+  const footerHtml = `
+    <button type="button" class="btn btn-secondary" onclick="closeModal()">Tutup</button>
+  `;
+
+  openModal(`Detail Presensi: Kelas ${escapeHtml(k.nama)}`, bodyHtml, footerHtml, true);
+}
+
+// ----------------------------------------------------------------------------
+// MODAL & HANDLERS: CATATAN KEJADIAN PIKET
+// ----------------------------------------------------------------------------
+function openModalKejadianPiket(catatanId = null) {
+  const existing = catatanId ? (db.jurnalPiket || []).find(j => j.id === catatanId) : null;
+  const session = getSession();
+  const defaultPetugas = (session && session.nama) ? session.nama : ((db.guruProfile && db.guruProfile.nama) ? db.guruProfile.nama : "Guru Piket Sekolah");
+
+  const now = new Date();
+  const currentHours = String(now.getHours()).padStart(2, '0');
+  const currentMins = String(now.getMinutes()).padStart(2, '0');
+  const currentTimeStr = `${currentHours}:${currentMins}`;
+
+  const tglVal = existing ? existing.tanggal : currentPiketDate;
+  const waktuVal = existing ? existing.waktu : currentTimeStr;
+  const tipeVal = existing ? existing.tipe : "Keterlambatan Gerbang";
+  const judulVal = existing ? existing.judul : "";
+  const siswaInfoVal = existing ? existing.siswaInfo : "";
+  const uraianVal = existing ? existing.uraian : "";
+  const tindakLanjutVal = existing ? existing.tindakLanjut : "";
+  const petugasVal = existing ? existing.petugas : defaultPetugas;
+  const statusVal = existing ? existing.status : "Selesai";
+
+  const bodyHtml = `
+    <form id="form-kejadian-piket" onsubmit="handleSaveKejadianPiket(event, '${catatanId || ''}')">
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 12px;">
+        <div>
+          <label class="form-label" for="kp-tanggal">Tanggal Kejadian <span style="color:#ef4444;">*</span></label>
+          <input type="date" id="kp-tanggal" class="form-control" value="${tglVal}" required>
+        </div>
+        <div>
+          <label class="form-label" for="kp-waktu">Waktu (Jam) <span style="color:#ef4444;">*</span></label>
+          <input type="time" id="kp-waktu" class="form-control" value="${waktuVal}" required>
+        </div>
+      </div>
+
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 12px;">
+        <div>
+          <label class="form-label" for="kp-tipe">Kategori / Jenis Kejadian <span style="color:#ef4444;">*</span></label>
+          <select id="kp-tipe" class="form-control" required>
+            <option value="Keterlambatan Gerbang" ${tipeVal === 'Keterlambatan Gerbang' ? 'selected' : ''}>Keterlambatan Masuk Gerbang</option>
+            <option value="Izin Keluar Sekolah" ${tipeVal === 'Izin Keluar Sekolah' ? 'selected' : ''}>Izin Keluar Lingkungan Sekolah</option>
+            <option value="Pelanggaran Disiplin" ${tipeVal === 'Pelanggaran Disiplin' ? 'selected' : ''}>Pelanggaran Disiplin / Seragam / Tata Tertib</option>
+            <option value="Pemeriksaan / Razia" ${tipeVal === 'Pemeriksaan / Razia' ? 'selected' : ''}>Pemeriksaan / Razia Kelengkapan</option>
+            <option value="Sakit di Ruang UKS" ${tipeVal === 'Sakit di Ruang UKS' ? 'selected' : ''}>Sakit / Diantar ke Ruang UKS</option>
+            <option value="Tamu Sekolah / Dinas" ${tipeVal === 'Tamu Sekolah / Dinas' ? 'selected' : ''}>Kunjungan Tamu / Orang Tua / Dinas</option>
+            <option value="Kejadian Khusus" ${tipeVal === 'Kejadian Khusus' ? 'selected' : ''}>Kejadian Khusus / Lainnya</option>
+          </select>
+        </div>
+        <div>
+          <label class="form-label" for="kp-status">Status Penanganan <span style="color:#ef4444;">*</span></label>
+          <select id="kp-status" class="form-control" required>
+            <option value="Selesai" ${statusVal === 'Selesai' ? 'selected' : ''}>Selesai / Teratasi</option>
+            <option value="Dalam Proses" ${statusVal === 'Dalam Proses' ? 'selected' : ''}>Dalam Proses Pemantauan</option>
+            <option value="Diteruskan ke BK/Wali" ${statusVal === 'Diteruskan ke BK/Wali' ? 'selected' : ''}>Diteruskan ke Guru BK / Wali Kelas</option>
+          </select>
+        </div>
+      </div>
+
+      <div style="margin-bottom: 12px;">
+        <label class="form-label" for="kp-judul">Judul / Perihal <span style="color:#ef4444;">*</span></label>
+        <input type="text" id="kp-judul" class="form-control" placeholder="Contoh: 3 Siswa Terlambat Masuk Jam Pertama" value="${escapeHtml(judulVal)}" required>
+      </div>
+
+      <div style="margin-bottom: 12px;">
+        <label class="form-label" for="kp-siswa-info">Siswa / Rombel / Pihak Terkait</label>
+        <input type="text" id="kp-siswa-info" class="form-control" placeholder="Contoh: Muh. Reza (Kelas XI-1), Andi (Kelas X-2)" value="${escapeHtml(siswaInfoVal)}">
+      </div>
+
+      <div style="margin-bottom: 12px;">
+        <label class="form-label" for="kp-uraian">Uraian Kejadian / Kronologi <span style="color:#ef4444;">*</span></label>
+        <textarea id="kp-uraian" class="form-control" rows="3" placeholder="Tuliskan kronologi singkat, penyebab, atau kejadian yang terjadi..." required>${escapeHtml(uraianVal)}</textarea>
+      </div>
+
+      <div style="margin-bottom: 12px;">
+        <label class="form-label" for="kp-tindak-lanjut">Tindak Lanjut Petugas Piket / Solusi</label>
+        <textarea id="kp-tindak-lanjut" class="form-control" rows="2" placeholder="Contoh: Diberi pembinaan disiplin, dicatat di kartu piket, diizinkan masuk kelas setelah jam pertama.">${escapeHtml(tindakLanjutVal)}</textarea>
+      </div>
+
+      <div style="margin-bottom: 14px;">
+        <label class="form-label" for="kp-petugas">Nama Guru Piket yang Mencatat</label>
+        <input type="text" id="kp-petugas" class="form-control" value="${escapeHtml(petugasVal)}" required>
+      </div>
+
+      <div style="display:flex; justify-content:flex-end; gap:8px;">
+        <button type="button" class="btn btn-secondary" onclick="closeModal()">Batal</button>
+        <button type="submit" class="btn btn-primary"><i class="fas fa-save"></i> Simpan Catatan</button>
+      </div>
+    </form>
+  `;
+
+  openModal(existing ? "Edit Catatan Kejadian Piket" : "Catat Kejadian / Jurnal Piket", bodyHtml, "", false);
+}
+
+function handleSaveKejadianPiket(event, catatanId) {
+  if (event) event.preventDefault();
+
+  const tanggal = document.getElementById("kp-tanggal").value;
+  const waktu = document.getElementById("kp-waktu").value;
+  const tipe = document.getElementById("kp-tipe").value;
+  const status = document.getElementById("kp-status").value;
+  const judul = document.getElementById("kp-judul").value.trim();
+  const siswaInfo = document.getElementById("kp-siswa-info").value.trim();
+  const uraian = document.getElementById("kp-uraian").value.trim();
+  const tindakLanjut = document.getElementById("kp-tindak-lanjut").value.trim();
+  const petugas = document.getElementById("kp-petugas").value.trim();
+
+  if (!tanggal || !judul || !uraian) {
+    showToast("Mohon lengkapi formulir catatan kejadian.");
+    return;
+  }
+
+  db.jurnalPiket = db.jurnalPiket || [];
+
+  if (catatanId) {
+    const idx = db.jurnalPiket.findIndex(j => j.id === catatanId);
+    if (idx !== -1) {
+      db.jurnalPiket[idx] = {
+        ...db.jurnalPiket[idx],
+        tanggal,
+        waktu,
+        tipe,
+        status,
+        judul,
+        siswaInfo,
+        uraian,
+        tindakLanjut,
+        petugas,
+        updatedAt: new Date().toISOString()
+      };
+    }
+  } else {
+    db.jurnalPiket.unshift({
+      id: "piket-" + Date.now(),
+      tanggal,
+      waktu,
+      tipe,
+      status,
+      judul,
+      siswaInfo,
+      uraian,
+      tindakLanjut,
+      petugas,
+      createdAt: new Date().toISOString()
+    });
+  }
+
+  saveDatabase();
+  closeModal();
+  showToast("Catatan kejadian piket berhasil disimpan!");
+
+  const activeNav = document.querySelector(".sidebar-menu li.active");
+  const activePage = activeNav ? activeNav.getAttribute("data-page") : "dashboard";
+  if (typeof renderPage === "function" && activePage) {
+    renderPage(activePage);
+  } else {
+    navigate("dashboard");
+  }
+}
+
+function deleteKejadianPiket(id) {
+  if (!confirm("Apakah Anda yakin ingin menghapus catatan kejadian piket ini?")) return;
+  db.jurnalPiket = (db.jurnalPiket || []).filter(j => j.id !== id);
+  saveDatabase();
+  showToast("Catatan kejadian piket telah dihapus.");
+
+  const activeNav = document.querySelector(".sidebar-menu li.active");
+  const activePage = activeNav ? activeNav.getAttribute("data-page") : "dashboard";
+  if (typeof renderPage === "function" && activePage) {
+    renderPage(activePage);
+  } else {
+    navigate("dashboard");
+  }
+}
+
+// ----------------------------------------------------------------------------
+// CETAK LAPORAN PIKET RESMI & JURNAL
+// ----------------------------------------------------------------------------
+function printLaporanPiketHarian() {
+  const summary = getPiketAttendanceSummary(currentPiketDate);
+  const session = getSession();
+  const teacherName = (session && session.nama) ? session.nama : ((db.guruProfile && db.guruProfile.nama) ? db.guruProfile.nama : "Guru Piket Sekolah");
+  const teacherNip = (db.guruProfile && db.guruProfile.nip) ? `NIP. ${db.guruProfile.nip}` : "-";
+  const kepalaSekolah = (db.guruProfile && db.guruProfile.kepalaSekolah) ? db.guruProfile.kepalaSekolah : "Kepala SMA Negeri 1 Lasolo";
+  const kepalaNip = (db.guruProfile && db.guruProfile.kepalaSekolahNip) ? `NIP. ${db.guruProfile.kepalaSekolahNip}` : "-";
+  const userSchool = getCurrentSchoolName();
+  const schoolAddress = (db.guruProfile && db.guruProfile.alamat) ? db.guruProfile.alamat : "Konawe Utara, Sulawesi Tenggara";
+
+  const dutyNotes = (db.jurnalPiket || []).filter(j => j.tanggal === currentPiketDate);
+  dutyNotes.sort((a, b) => (a.waktu || "").localeCompare(b.waktu || ""));
+
+  const win = window.open("", "_blank");
+  if (!win) {
+    alert("Jendela pop-up diblokir browser. Harap izinkan pop-up untuk mencetak laporan.");
+    return;
+  }
+
+  win.document.write(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Laporan Harian Guru Piket - ${formatDateIndo(currentPiketDate)}</title>
+      <style>
+        body { font-family: 'Times New Roman', Times, serif; margin: 12mm 15mm; color: #000; line-height: 1.35; font-size: 10.5pt; }
+        .kop { text-align: center; border-bottom: 3px double #000; padding-bottom: 8px; margin-bottom: 12px; }
+        .kop h2 { margin: 0; font-size: 13pt; text-transform: uppercase; font-weight: bold; }
+        .kop h3 { margin: 2px 0; font-size: 15pt; text-transform: uppercase; font-weight: bold; }
+        .kop p { margin: 0; font-size: 9pt; font-style: italic; }
+        h4 { text-align: center; margin: 12px 0 2px; font-size: 12.5pt; text-transform: uppercase; font-weight: bold; }
+        .subtitle { text-align: center; margin: 0 0 12px; font-size: 10pt; }
+        table.meta { width: 100%; margin-bottom: 10px; font-size: 10pt; border-collapse: collapse; }
+        table.meta td { padding: 2px 0; border: none; }
+        table.data { width: 100%; border-collapse: collapse; margin-top: 6px; margin-bottom: 14px; font-size: 9pt; }
+        table.data th, table.data td { border: 1px solid #000; padding: 4px 6px; vertical-align: middle; }
+        table.data th { background: #f2f2f2; text-align: center; font-weight: bold; }
+        .sec-title { font-size: 10.5pt; font-weight: bold; margin: 10px 0 4px; text-transform: uppercase; }
+        .ttd-box { margin-top: 25px; display: flex; justify-content: space-between; text-align: center; font-size: 10pt; page-break-inside: avoid; }
+        .ttd-col { width: 45%; }
+        .ttd-space { height: 60px; }
+        @media print {
+          @page { size: A4 portrait; margin: 10mm; }
+        }
+      </style>
+    </head>
+    <body>
+      <div class="kop">
+        <h2>PEMERINTAH DAERAH PROVINSI SULAWESI TENGGARA</h2>
+        <h2>DINAS PENDIDIKAN DAN KEBUDAYAAN</h2>
+        <h3>${escapeHtml(userSchool)}</h3>
+        <p>${escapeHtml(schoolAddress)}</p>
+      </div>
+
+      <h4>LAPORAN HARIAN GURU PIKET SEKOLAH</h4>
+      <div class="subtitle">Rekapitulasi Presensi Seluruh Rombel, Ketertiban Siswa, dan Catatan Kejadian Piket</div>
+
+      <table class="meta">
+        <tr>
+          <td style="width: 18%;"><strong>Hari / Tanggal</strong></td>
+          <td style="width: 32%;">: ${formatDateIndoFull(currentPiketDate)}</td>
+          <td style="width: 20%;"><strong>Petugas Guru Piket</strong></td>
+          <td style="width: 30%;">: ${escapeHtml(teacherName)}</td>
+        </tr>
+        <tr>
+          <td><strong>Total Rombel</strong></td>
+          <td>: ${summary.classesCount} Kelas (${summary.totalKelasTerabsen} Terabsen)</td>
+          <td><strong>Total Siswa Sekolah</strong></td>
+          <td>: ${summary.totalSiswaSekolah} Siswa</td>
+        </tr>
+        <tr>
+          <td><strong>Kehadiran Sekolah</strong></td>
+          <td>: <strong>${summary.persenKehadiranSekolah}%</strong> (${summary.totalHadir + summary.totalTerlambat} Siswa Hadir)</td>
+          <td><strong>Tidak Hadir (S/I/A/B)</strong></td>
+          <td>: ${summary.totalTidakHadir} Siswa (S:${summary.totalSakit}, I:${summary.totalIzin}, A:${summary.totalAlpa}, B:${summary.totalBolos})</td>
+        </tr>
+      </table>
+
+      <!-- Tabel 1: Rekap Kehadiran per Kelas -->
+      <div class="sec-title">I. Rekapitulasi Presensi per Rombongan Belajar (Kelas)</div>
+      <table class="data">
+        <thead>
+          <tr>
+            <th style="width: 25px;">No</th>
+            <th>Kelas</th>
+            <th>Wali Kelas</th>
+            <th style="width: 45px;">Jml</th>
+            <th style="width: 45px;">Hadir</th>
+            <th style="width: 45px;">Lmbt</th>
+            <th style="width: 35px;">S</th>
+            <th style="width: 35px;">I</th>
+            <th style="width: 35px;">A</th>
+            <th style="width: 35px;">B</th>
+            <th style="width: 65px;">% Hadir</th>
+            <th style="width: 70px;">Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${summary.classSummaries.map((cs, idx) => `
+            <tr>
+              <td style="text-align: center;">${idx + 1}</td>
+              <td><strong>${escapeHtml(cs.kelas.nama)}</strong></td>
+              <td>${escapeHtml(cs.kelas.waliKelas || '-')}</td>
+              <td style="text-align: center;">${cs.totalSiswa}</td>
+              <td style="text-align: center;">${cs.hadir}</td>
+              <td style="text-align: center;">${cs.terlambat}</td>
+              <td style="text-align: center;">${cs.sakit}</td>
+              <td style="text-align: center;">${cs.izin}</td>
+              <td style="text-align: center;">${cs.alpa}</td>
+              <td style="text-align: center;">${cs.bolos}</td>
+              <td style="text-align: center; font-weight: bold;">${cs.persen}%</td>
+              <td style="text-align: center;">${cs.isTerabsen ? 'Terabsen' : 'Belum'}</td>
+            </tr>
+          `).join("")}
+          <tr style="font-weight: bold; background: #fafafa;">
+            <td colspan="3" style="text-align: right;">TOTAL SEKOLAH :</td>
+            <td style="text-align: center;">${summary.totalSiswaSekolah}</td>
+            <td style="text-align: center;">${summary.totalHadir}</td>
+            <td style="text-align: center;">${summary.totalTerlambat}</td>
+            <td style="text-align: center;">${summary.totalSakit}</td>
+            <td style="text-align: center;">${summary.totalIzin}</td>
+            <td style="text-align: center;">${summary.totalAlpa}</td>
+            <td style="text-align: center;">${summary.totalBolos}</td>
+            <td style="text-align: center;">${summary.persenKehadiranSekolah}%</td>
+            <td style="text-align: center;">-</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <!-- Tabel 2: Siswa Tidak Hadir / Terlambat -->
+      <div class="sec-title">II. Daftar Siswa Tidak Hadir & Terlambat</div>
+      <table class="data">
+        <thead>
+          <tr>
+            <th style="width: 25px;">No</th>
+            <th style="width: 90px;">NISN</th>
+            <th>Nama Siswa</th>
+            <th style="width: 70px;">Kelas</th>
+            <th style="width: 75px;">Status</th>
+            <th>Wali Kelas</th>
+            <th>Orang Tua / No. HP</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${summary.radarStudents.length === 0 ? `
+            <tr><td colspan="7" style="text-align:center; padding:10px;">Alhamdulillah, seluruh siswa terdata hadir pada tanggal ini.</td></tr>
+          ` : summary.radarStudents.map((item, idx) => {
+            const s = item.siswa;
+            const contact = getStudentParentContact(s.id);
+            return `
+              <tr>
+                <td style="text-align: center;">${idx + 1}</td>
+                <td>${escapeHtml(s.nisn || '-')}</td>
+                <td><strong>${escapeHtml(s.nama)}</strong></td>
+                <td>${escapeHtml(item.kelas.nama)}</td>
+                <td style="text-align: center; font-weight: bold;">${item.status}</td>
+                <td>${escapeHtml(item.kelas.waliKelas || '-')}</td>
+                <td>${escapeHtml(contact.namaWali)} (${contact.noHp || '-'})</td>
+              </tr>
+            `;
+          }).join("")}
+        </tbody>
+      </table>
+
+      <!-- Tabel 3: Jurnal Catatan Kejadian Piket -->
+      <div class="sec-title">III. Buku Catatan Kejadian & Penanganan Guru Piket</div>
+      <table class="data">
+        <thead>
+          <tr>
+            <th style="width: 25px;">No</th>
+            <th style="width: 50px;">Waktu</th>
+            <th style="width: 100px;">Kategori</th>
+            <th>Judul & Uraian Kejadian</th>
+            <th>Pihak / Siswa Terkait</th>
+            <th>Tindak Lanjut & Pembinaan</th>
+            <th style="width: 65px;">Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${dutyNotes.length === 0 ? `
+            <tr><td colspan="7" style="text-align:center; padding:10px;">Tidak ada catatan kejadian khusus pada hari ini. Kondisi sekolah aman dan kondusif.</td></tr>
+          ` : dutyNotes.map((item, idx) => `
+            <tr>
+              <td style="text-align: center;">${idx + 1}</td>
+              <td style="text-align: center;">${escapeHtml(item.waktu || '-')}</td>
+              <td>${escapeHtml(item.tipe || '-')}</td>
+              <td>
+                <strong>${escapeHtml(item.judul || '')}</strong><br>
+                ${escapeHtml(item.uraian || '')}
+              </td>
+              <td>${escapeHtml(item.siswaInfo || '-')}</td>
+              <td>${escapeHtml(item.tindakLanjut || '-')}</td>
+              <td style="text-align: center;">${escapeHtml(item.status || 'Selesai')}</td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+
+      <!-- Tanda Tangan -->
+      <div class="ttd-box">
+        <div class="ttd-col">
+          Mengetahui,<br>
+          Kepala Sekolah<br>
+          <div class="ttd-space"></div>
+          <strong><u>${escapeHtml(kepalaSekolah)}</u></strong><br>
+          ${kepalaNip}
+        </div>
+        <div class="ttd-col">
+          Lasolo, ${formatDateIndoFull(currentPiketDate)}<br>
+          Guru Piket yang Bertugas,<br>
+          <div class="ttd-space"></div>
+          <strong><u>${escapeHtml(teacherName)}</u></strong><br>
+          ${teacherNip}
+        </div>
+      </div>
+
+      <script>
+        window.onload = function() {
+          window.print();
+        };
+      </script>
+    </body>
+    </html>
+  `);
+  win.document.close();
+}
+
+function printJurnalPiketOnly() {
+  const session = getSession();
+  const teacherName = (session && session.nama) ? session.nama : ((db.guruProfile && db.guruProfile.nama) ? db.guruProfile.nama : "Guru Piket Sekolah");
+  const teacherNip = (db.guruProfile && db.guruProfile.nip) ? `NIP. ${db.guruProfile.nip}` : "-";
+  const kepalaSekolah = (db.guruProfile && db.guruProfile.kepalaSekolah) ? db.guruProfile.kepalaSekolah : "Kepala SMA Negeri 1 Lasolo";
+  const kepalaNip = (db.guruProfile && db.guruProfile.kepalaSekolahNip) ? `NIP. ${db.guruProfile.kepalaSekolahNip}` : "-";
+  const userSchool = getCurrentSchoolName();
+  const schoolAddress = (db.guruProfile && db.guruProfile.alamat) ? db.guruProfile.alamat : "Konawe Utara, Sulawesi Tenggara";
+
+  const dutyNotes = (db.jurnalPiket || []).filter(j => j.tanggal === currentPiketDate);
+  dutyNotes.sort((a, b) => (a.waktu || "").localeCompare(b.waktu || ""));
+
+  const win = window.open("", "_blank");
+  if (!win) {
+    alert("Jendela pop-up diblokir browser. Harap izinkan pop-up.");
+    return;
+  }
+
+  win.document.write(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Buku Jurnal Kejadian Guru Piket - ${formatDateIndo(currentPiketDate)}</title>
+      <style>
+        body { font-family: 'Times New Roman', Times, serif; margin: 15mm; color: #000; line-height: 1.4; font-size: 11pt; }
+        .kop { text-align: center; border-bottom: 3px double #000; padding-bottom: 8px; margin-bottom: 14px; }
+        .kop h2 { margin: 0; font-size: 13pt; text-transform: uppercase; font-weight: bold; }
+        .kop h3 { margin: 2px 0; font-size: 15pt; text-transform: uppercase; font-weight: bold; }
+        .kop p { margin: 0; font-size: 9.5pt; font-style: italic; }
+        h4 { text-align: center; margin: 14px 0 2px; font-size: 13pt; text-transform: uppercase; font-weight: bold; }
+        .subtitle { text-align: center; margin: 0 0 14px; font-size: 10.5pt; }
+        table.meta { width: 100%; margin-bottom: 12px; font-size: 10.5pt; border-collapse: collapse; }
+        table.meta td { padding: 3px 0; border: none; }
+        table.data { width: 100%; border-collapse: collapse; margin-top: 8px; margin-bottom: 16px; font-size: 9.5pt; }
+        table.data th, table.data td { border: 1px solid #000; padding: 6px 8px; vertical-align: top; }
+        table.data th { background: #f2f2f2; text-align: center; font-weight: bold; }
+        .ttd-box { margin-top: 30px; display: flex; justify-content: space-between; text-align: center; font-size: 11pt; page-break-inside: avoid; }
+        .ttd-col { width: 45%; }
+        .ttd-space { height: 60px; }
+        @media print {
+          @page { size: A4 landscape; margin: 12mm; }
+        }
+      </style>
+    </head>
+    <body>
+      <div class="kop">
+        <h2>PEMERINTAH DAERAH PROVINSI SULAWESI TENGGARA</h2>
+        <h2>DINAS PENDIDIKAN DAN KEBUDAYAAN</h2>
+        <h3>${escapeHtml(userSchool)}</h3>
+        <p>${escapeHtml(schoolAddress)}</p>
+      </div>
+
+      <h4>BUKU CATATAN KEJADIAN / JURNAL HARIAN GURU PIKET</h4>
+      <div class="subtitle">Catatan Keterlambatan Gerbang, Izin Keluar, Ketertiban Siswa, dan Pelayanan Tamu</div>
+
+      <table class="meta">
+        <tr>
+          <td style="width: 15%;"><strong>Hari / Tanggal</strong></td>
+          <td style="width: 35%;">: ${formatDateIndoFull(currentPiketDate)}</td>
+          <td style="width: 18%;"><strong>Petugas Guru Piket</strong></td>
+          <td style="width: 32%;">: ${escapeHtml(teacherName)}</td>
+        </tr>
+      </table>
+
+      <table class="data">
+        <thead>
+          <tr>
+            <th style="width: 30px;">No</th>
+            <th style="width: 60px;">Waktu</th>
+            <th style="width: 130px;">Kategori</th>
+            <th style="width: 180px;">Judul & Perihal</th>
+            <th style="width: 150px;">Siswa / Kelas</th>
+            <th>Uraian Kejadian / Kronologi</th>
+            <th>Tindak Lanjut & Pembinaan</th>
+            <th style="width: 80px;">Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${dutyNotes.length === 0 ? `
+            <tr><td colspan="8" style="text-align:center; padding:20px;">Belum ada catatan kejadian pada hari ini. Kondisi sekolah tertib dan aman.</td></tr>
+          ` : dutyNotes.map((item, idx) => `
+            <tr>
+              <td style="text-align: center;">${idx + 1}</td>
+              <td style="text-align: center; font-weight: bold;">${escapeHtml(item.waktu || '-')}</td>
+              <td>${escapeHtml(item.tipe || '-')}</td>
+              <td><strong>${escapeHtml(item.judul || '')}</strong></td>
+              <td>${escapeHtml(item.siswaInfo || '-')}</td>
+              <td>${escapeHtml(item.uraian || '')}</td>
+              <td>${escapeHtml(item.tindakLanjut || '-')}</td>
+              <td style="text-align: center;">${escapeHtml(item.status || 'Selesai')}</td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+
+      <div class="ttd-box">
+        <div class="ttd-col">
+          Mengetahui,<br>
+          Kepala Sekolah<br>
+          <div class="ttd-space"></div>
+          <strong><u>${escapeHtml(kepalaSekolah)}</u></strong><br>
+          ${kepalaNip}
+        </div>
+        <div class="ttd-col">
+          Lasolo, ${formatDateIndoFull(currentPiketDate)}<br>
+          Guru Piket yang Bertugas,<br>
+          <div class="ttd-space"></div>
+          <strong><u>${escapeHtml(teacherName)}</u></strong><br>
+          ${teacherNip}
+        </div>
+      </div>
+
+      <script>
+        window.onload = function() {
+          window.print();
+        };
+      </script>
+    </body>
+    </html>
+  `);
+  win.document.close();
+}
+
+// ----------------------------------------------------------------------------
+// EKSPOR CSV LAPORAN PIKET
+// ----------------------------------------------------------------------------
+function exportPiketHarianCSV() {
+  const summary = getPiketAttendanceSummary(currentPiketDate);
+  const userSchool = getCurrentSchoolName();
+
+  let csv = `LAPORAN HARIAN GURU PIKET SEKOLAH\r\n`;
+  csv += `Sekolah:;${userSchool}\r\n`;
+  csv += `Tanggal:;${formatDateIndoFull(currentPiketDate)}\r\n`;
+  csv += `Total Siswa Sekolah:;${summary.totalSiswaSekolah}\r\n`;
+  csv += `Persentase Kehadiran Sekolah:;${summary.persenKehadiranSekolah}%\r\n`;
+  csv += `Total Hadir:;${summary.totalHadir}\r\n`;
+  csv += `Total Terlambat:;${summary.totalTerlambat}\r\n`;
+  csv += `Total Sakit:;${summary.totalSakit}\r\n`;
+  csv += `Total Izin:;${summary.totalIzin}\r\n`;
+  csv += `Total Alpa:;${summary.totalAlpa}\r\n`;
+  csv += `Total Bolos:;${summary.totalBolos}\r\n\r\n`;
+
+  csv += `BAGIAN 1: REKAPITULASI KEHADIRAN PER ROMBEL (KELAS)\r\n`;
+  csv += `No;Nama Kelas;Wali Kelas;Total Siswa;Hadir;Terlambat;Sakit;Izin;Alpa;Bolos;Belum Diabsen;Persentase Kehadiran;Status Rombel\r\n`;
+
+  summary.classSummaries.forEach((cs, idx) => {
+    csv += `${idx + 1};"${cs.kelas.nama}";"${cs.kelas.waliKelas || '-'}";${cs.totalSiswa};${cs.hadir};${cs.terlambat};${cs.sakit};${cs.izin};${cs.alpa};${cs.bolos};${cs.belumDiabsen};${cs.persen}%;"${cs.isTerabsen ? 'Terabsen' : 'Belum Diabsen'}"\r\n`;
+  });
+
+  csv += `\r\nBAGIAN 2: DAFTAR SISWA TIDAK HADIR DAN TERLAMBAT\r\n`;
+  csv += `No;NISN;Nama Siswa;Kelas;Status;Wali Kelas;Nama Orang Tua;Nomor HP\r\n`;
+
+  summary.radarStudents.forEach((item, idx) => {
+    const s = item.siswa;
+    const contact = getStudentParentContact(s.id);
+    csv += `${idx + 1};"${s.nisn || ''}";"${s.nama}";"${item.kelas.nama}";"${item.status}";"${item.kelas.waliKelas || '-'}";"${contact.namaWali}";"${contact.noHp || ''}"\r\n`;
+  });
+
+  downloadCSV(csv, `laporan_guru_piket_${currentPiketDate}.csv`);
+  showToast("File laporan harian piket berhasil diunduh dalam format CSV!");
+}
+
 

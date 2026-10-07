@@ -84,6 +84,21 @@
           <button type="submit" class="login-btn" id="login-submit-btn">
             <i class="fas fa-sign-in-alt"></i> Masuk ke Aplikasi
           </button>
+
+          <div style="display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; margin-top: 14px;">
+            <button type="button" class="btn btn-sm btn-outline-secondary" onclick="fillDemoLogin('admin@smansaku.id', 'admin123')" style="font-size: 0.76rem; padding: 3px 8px; border-radius: 6px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.2); color: #e2e8f0;">
+              <i class="fas fa-user-shield"></i> Admin
+            </button>
+            <button type="button" class="btn btn-sm btn-outline-secondary" onclick="fillDemoLogin('guru@smansaku.id', 'guru123')" style="font-size: 0.76rem; padding: 3px 8px; border-radius: 6px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.2); color: #e2e8f0;">
+              <i class="fas fa-chalkboard-user"></i> Guru
+            </button>
+            <button type="button" class="btn btn-sm btn-outline-secondary" onclick="fillDemoLogin('ikbar@smansaku.id', 'r@bk10812')" style="font-size: 0.76rem; padding: 3px 8px; border-radius: 6px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.2); color: #e2e8f0;">
+              <i class="fas fa-heart"></i> Guru BK
+            </button>
+            <button type="button" class="btn btn-sm btn-outline-secondary" onclick="fillDemoLogin('piket@smansaku.id', 'piket123')" style="font-size: 0.76rem; padding: 3px 8px; border-radius: 6px; background: rgba(14,165,233,0.15); border: 1px solid rgba(14,165,233,0.4); color: #38bdf8; font-weight: 600;">
+              <i class="fas fa-clipboard-check"></i> Guru Piket
+            </button>
+          </div>
         </form>
 
         <!-- WhatsApp Admin Registration Box -->
@@ -259,6 +274,18 @@
                   <span class="item-badge gurubk">Konseling & Karir</span>
                 </div>
                 <div class="item-desc">Layanan konseling siswa, peta kerawanan, peminatan studi/karir, dan penanganan kasus khusus.</div>
+              </div>
+            </button>
+            <button type="button" class="mode-dropdown-item" data-mode="gurupiket" onclick="setAppMode('gurupiket')">
+              <div class="item-icon-box gurupiket">
+                <i class="fas fa-clipboard-check"></i>
+              </div>
+              <div class="item-content">
+                <div class="item-title-row">
+                  <span class="item-title">Mode Guru Piket</span>
+                  <span class="item-badge gurupiket">Piket Harian</span>
+                </div>
+                <div class="item-desc">Rekap kehadiran seluruh rombel kelas, pemantauan ketertiban, dan catatan kejadian piket.</div>
               </div>
             </button>
           </div>

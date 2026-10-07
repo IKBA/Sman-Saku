@@ -873,6 +873,19 @@ header {
   color: #ea580c;
 }
 
+.btn-mode-switcher.mode-gurupiket {
+  border-color: rgba(14, 165, 233, 0.55);
+  background: rgba(14, 165, 233, 0.09);
+}
+.btn-mode-switcher.mode-gurupiket .mode-icon-circle {
+  background: linear-gradient(135deg, #0ea5e9, #0284c7);
+}
+.btn-mode-switcher.mode-gurupiket .mode-active-title {
+  color: #0284c7;
+}
+
+.item-icon-box.gurupiket { background: linear-gradient(135deg, #0ea5e9, #0284c7); }
+
 /* Dropdown menu */
 .mode-dropdown-menu {
   position: absolute;
