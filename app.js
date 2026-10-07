@@ -179,7 +179,7 @@ function escapeHtml(str) {
 // ==========================================
 const AUTH_STORAGE_KEY = "saku_guru_auth";
 const USERS_STORAGE_KEY = "saku_guru_users";
-const APP_BUILD_VERSION = "1.2.3_20261002";
+const APP_BUILD_VERSION = "1.2.4_20261007";
 
 // Reset session on fresh installation or new APK build to always show login screen
 (function checkAppInstallVersion() {
@@ -1372,7 +1372,617 @@ function cleanupLegacyDuplicateData(targetDb) {
     if (targetDb.jurnal.length !== originalLen) modified = true;
   }
 
+  // 8. Pastikan daftar mapel kurikulum sekolah lengkap
+  ensureCompleteSchoolMapel(targetDb);
+
   return modified;
+}
+
+// ============================================================================
+// SINKRONISASI DATA ANTAR-AKUN SEKOLAH (CROSS-ACCOUNT DATA SYNCHRONIZATION)
+// Menghubungkan data absensi, nilai, jurnal, & laporan dari seluruh guru
+// ============================================================================
+const SHARED_SCHOOL_DATA_KEY = "sman_saku_shared_school_data";
+
+const DEFAULT_SCHOOL_MAPEL = [
+  "Matematika",
+  "Bahasa Indonesia",
+  "Bahasa Inggris",
+  "Fisika",
+  "Kimia",
+  "Biologi",
+  "Sejarah",
+  "Pendidikan Agama",
+  "PPKn",
+  "Seni Budaya",
+  "PJOK",
+  "Prakarya"
+];
+
+function ensureCompleteSchoolMapel(targetDb) {
+  if (!targetDb || typeof targetDb !== 'object') return;
+  const set = new Set();
+  (targetDb.mapel || []).forEach(m => { if (m && m.trim()) set.add(m.trim()); });
+  DEFAULT_SCHOOL_MAPEL.forEach(m => set.add(m));
+  targetDb.mapel = Array.from(set);
+}
+
+function getSchoolMasterMapel() {
+  const set = new Set();
+  if (typeof db !== "undefined" && db && Array.isArray(db.mapel)) {
+    db.mapel.forEach(m => { if (m && m.trim()) set.add(m.trim()); });
+  }
+  DEFAULT_SCHOOL_MAPEL.forEach(m => set.add(m));
+  return Array.from(set);
+}
+
+function getTeacherAssignedSubjects() {
+  if (typeof db === "undefined" || !db) return ["Mata Pelajaran"];
+  if (db.guruProfile && Array.isArray(db.guruProfile.mapelAmpu) && db.guruProfile.mapelAmpu.length > 0) {
+    return db.guruProfile.mapelAmpu;
+  }
+  if (db.guruProfile && db.guruProfile.mapel && db.guruProfile.mapel.trim() && db.guruProfile.mapel.trim() !== "Mata Pelajaran") {
+    const list = db.guruProfile.mapel.split(",").map(s => s.trim()).filter(Boolean);
+    if (list.length > 0) return list;
+  }
+  return ["Mata Pelajaran"];
+}
+
+const PRESET_MAPEL_JURUSAN = {
+  umum: [
+    "Pendidikan Agama",
+    "PPKn",
+    "Bahasa Indonesia",
+    "Matematika",
+    "Sejarah",
+    "Bahasa Inggris",
+    "Seni Budaya",
+    "PJOK",
+    "Prakarya",
+    "Informatika"
+  ],
+  mipa: [
+    "Pendidikan Agama",
+    "PPKn",
+    "Bahasa Indonesia",
+    "Matematika",
+    "Bahasa Inggris",
+    "Fisika",
+    "Kimia",
+    "Biologi",
+    "Matematika Tingkat Lanjut",
+    "Sejarah",
+    "Seni Budaya",
+    "PJOK",
+    "Prakarya",
+    "Informatika"
+  ],
+  ips: [
+    "Pendidikan Agama",
+    "PPKn",
+    "Bahasa Indonesia",
+    "Matematika",
+    "Bahasa Inggris",
+    "Ekonomi",
+    "Sosiologi",
+    "Geografi",
+    "Sejarah",
+    "Seni Budaya",
+    "PJOK",
+    "Prakarya",
+    "Informatika"
+  ],
+  bahasa: [
+    "Pendidikan Agama",
+    "PPKn",
+    "Bahasa Indonesia",
+    "Matematika",
+    "Bahasa Inggris",
+    "Bahasa & Sastra Indonesia",
+    "Bahasa & Sastra Inggris",
+    "Bahasa Asing",
+    "Antropologi",
+    "Sejarah",
+    "Seni Budaya",
+    "PJOK",
+    "Prakarya"
+  ]
+};
+
+function getWaliKelasMapelList(classId) {
+  if (typeof db === "undefined" || !db) return DEFAULT_SCHOOL_MAPEL;
+  
+  // 1. Cek konfigurasi kustom mapel khusus kelas ini jika sudah pernah disetel oleh Wali Kelas / Admin
+  const kelas = (db.kelas || []).find(k => String(k.id) === String(classId));
+  if (kelas && Array.isArray(kelas.mapelLedger) && kelas.mapelLedger.length > 0) {
+    return [...kelas.mapelLedger];
+  }
+  if (db.mapelLedger && Array.isArray(db.mapelLedger[classId]) && db.mapelLedger[classId].length > 0) {
+    return [...db.mapelLedger[classId]];
+  }
+
+  const students = getStudentsForClass(classId);
+  const studentIds = new Set(students.map(s => s.id));
+  
+  const activeClassMapel = new Set();
+  const allCurriculumMapel = new Set();
+
+  // 1. Mapel yang sudah memiliki nilai di kelas binaan ini (Prioritas Utama: nilai dari seluruh guru mapel)
+  (db.nilai || []).forEach(n => {
+    if (n && n.mapel && n.mapel.trim() && studentIds.has(n.siswaId)) {
+      activeClassMapel.add(n.mapel.trim());
+    }
+  });
+
+  // 2. Mapel dari rekapan absensi kelas binaan ini
+  (db.absensi || []).forEach(a => {
+    if (a && a.mapel && a.mapel.trim() && String(a.kelasId) === String(classId)) {
+      activeClassMapel.add(a.mapel.trim());
+    }
+  });
+
+  // 3. Mapel dari jadwal pelajaran kelas binaan ini
+  (db.jadwal || []).forEach(j => {
+    if (j && j.mapel && j.mapel.trim() && String(j.kelasId) === String(classId)) {
+      activeClassMapel.add(j.mapel.trim());
+    }
+  });
+
+  // 4. Mapel dari jurnal mengajar guru untuk kelas binaan ini
+  (db.jurnal || []).forEach(j => {
+    if (j && j.mapel && j.mapel.trim() && String(j.kelasId) === String(classId)) {
+      activeClassMapel.add(j.mapel.trim());
+    }
+  });
+
+  // 5. Rekomendasi kurikulum bawaan: sesuaikan secara cerdas dengan nama jurusan kelas jika belum dikonfigurasi kustom
+  const namaKelas = (kelas && kelas.nama ? kelas.nama : "").toUpperCase();
+  let baseCurriculum = [];
+  if (namaKelas.includes("IPS") || namaKelas.includes("SOSIAL")) {
+    baseCurriculum = PRESET_MAPEL_JURUSAN.ips;
+  } else if (namaKelas.includes("BAHASA") || namaKelas.includes("IBB") || namaKelas.includes("BUDAYA")) {
+    baseCurriculum = PRESET_MAPEL_JURUSAN.bahasa;
+  } else if (namaKelas.includes("IPA") || namaKelas.includes("MIPA")) {
+    baseCurriculum = PRESET_MAPEL_JURUSAN.mipa;
+  } else {
+    baseCurriculum = getSchoolMasterMapel();
+  }
+
+  baseCurriculum.forEach(m => {
+    if (m && m.trim()) allCurriculumMapel.add(m.trim());
+  });
+
+  // Urutan: Mapel yang memiliki nilai / aktivitas di kelas ditaruh di depan, diikuti mapel kurikulum lainnya
+  const result = [];
+  activeClassMapel.forEach(m => result.push(m));
+  allCurriculumMapel.forEach(m => {
+    if (!activeClassMapel.has(m)) result.push(m);
+  });
+
+  return result.length > 0 ? result : (baseCurriculum.length > 0 ? baseCurriculum : DEFAULT_SCHOOL_MAPEL);
+}
+
+function extractSharedSchoolData(sourceDb, schoolName) {
+  if (!sourceDb || typeof sourceDb !== 'object') return null;
+  return {
+    school: schoolName,
+    last_updated: new Date().toISOString(),
+    absensi: sourceDb.absensi || [],
+    nilai: sourceDb.nilai || [],
+    jurnal: sourceDb.jurnal || [],
+    catatanWali: sourceDb.catatanWali || [],
+    jurnalBimbingan: sourceDb.jurnalBimbingan || [],
+    layananBK: sourceDb.layananBK || [],
+    agendaBK: sourceDb.agendaBK || [],
+    kontakWali: sourceDb.kontakWali || [],
+    kelas: sourceDb.kelas || [],
+    siswa: sourceDb.siswa || [],
+    deletedRecordIds: sourceDb.deletedRecordIds || []
+  };
+}
+
+function mergeSchoolSharedRecords(targetDb, sourceDb, sourceEmail = "") {
+  if (!targetDb || !sourceDb || typeof sourceDb !== 'object') return false;
+  if (sourceDb.is_demo && !targetDb.is_demo) return false;
+
+  let changed = false;
+  const deletedIds = new Set([
+    ...(targetDb.deletedRecordIds || []).map(d => typeof d === 'object' ? d.id : d),
+    ...(sourceDb.deletedRecordIds || []).map(d => typeof d === 'object' ? d.id : d)
+  ]);
+
+  // Sinkronkan daftar ID yang telah dihapus (tombstones)
+  if (Array.isArray(sourceDb.deletedRecordIds) && sourceDb.deletedRecordIds.length > 0) {
+    targetDb.deletedRecordIds = targetDb.deletedRecordIds || [];
+    sourceDb.deletedRecordIds.forEach(did => {
+      const idStr = typeof did === 'object' ? did.id : did;
+      if (!targetDb.deletedRecordIds.some(x => (typeof x === 'object' ? x.id : x) === idStr)) {
+        targetDb.deletedRecordIds.push(did);
+        changed = true;
+      }
+    });
+  }
+
+  // 1. ABSENSI SISWA (Attendance)
+  if (Array.isArray(sourceDb.absensi) && sourceDb.absensi.length > 0) {
+    targetDb.absensi = targetDb.absensi || [];
+    const absMap = new Map();
+    targetDb.absensi.forEach((a, idx) => {
+      if (!a) return;
+      if (a.id) absMap.set(String(a.id), idx);
+      const composite = String(a.siswaId) + '_' + String(a.tanggal) + '_' + String(a.mapel || '') + '_' + String(a.jamKe || '');
+      absMap.set(composite, idx);
+    });
+
+    sourceDb.absensi.forEach(src => {
+      if (!src || !src.siswaId || !src.tanggal) return;
+      if (src.id && deletedIds.has(String(src.id))) return;
+
+      const composite = String(src.siswaId) + '_' + String(src.tanggal) + '_' + String(src.mapel || '') + '_' + String(src.jamKe || '');
+      const existingIdx = (src.id && absMap.has(String(src.id)))
+        ? absMap.get(String(src.id))
+        : (absMap.has(composite) ? absMap.get(composite) : -1);
+
+      if (existingIdx !== undefined && existingIdx >= 0 && existingIdx < targetDb.absensi.length) {
+        const cur = targetDb.absensi[existingIdx];
+        if (src.followUp && src.followUp.status === 'sudah' && (!cur.followUp || cur.followUp.status !== 'sudah')) {
+          cur.followUp = src.followUp;
+          changed = true;
+        }
+        if (src.updatedAt && cur.updatedAt && new Date(src.updatedAt) > new Date(cur.updatedAt)) {
+          if (cur.status !== src.status) { cur.status = src.status; changed = true; }
+          if (cur.catatan !== src.catatan) { cur.catatan = src.catatan; changed = true; }
+          if (src.followUp) { cur.followUp = src.followUp; changed = true; }
+        }
+      } else {
+        const copy = { ...src };
+        if (!copy.id) copy.id = 'a-' + Date.now() + '-' + Math.random().toString(36).substring(2, 7);
+        if (!copy.guruEmail && sourceEmail) copy.guruEmail = sourceEmail;
+        targetDb.absensi.push(copy);
+        const newIdx = targetDb.absensi.length - 1;
+        if (copy.id) absMap.set(String(copy.id), newIdx);
+        absMap.set(composite, newIdx);
+        changed = true;
+      }
+    });
+  }
+
+  // 2. PENILAIAN SISWA (Grades)
+  if (Array.isArray(sourceDb.nilai) && sourceDb.nilai.length > 0) {
+    targetDb.nilai = targetDb.nilai || [];
+    const nilMap = new Map();
+    targetDb.nilai.forEach((n, idx) => {
+      if (!n) return;
+      if (n.id) nilMap.set(String(n.id), idx);
+      const composite = String(n.siswaId) + '_' + String(n.mapel || '') + '_' + String(n.jenis || n.kategori || '') + '_' + String(n.label || n.tugasKe || '');
+      nilMap.set(composite, idx);
+    });
+
+    sourceDb.nilai.forEach(src => {
+      if (!src || !src.siswaId || !src.mapel) return;
+      if (src.id && deletedIds.has(String(src.id))) return;
+
+      const composite = String(src.siswaId) + '_' + String(src.mapel || '') + '_' + String(src.jenis || src.kategori || '') + '_' + String(src.label || src.tugasKe || '');
+      const existingIdx = (src.id && nilMap.has(String(src.id)))
+        ? nilMap.get(String(src.id))
+        : (nilMap.has(composite) ? nilMap.get(composite) : -1);
+
+      if (existingIdx !== undefined && existingIdx >= 0 && existingIdx < targetDb.nilai.length) {
+        const cur = targetDb.nilai[existingIdx];
+        if (src.nilai !== undefined && src.nilai !== null && src.nilai !== cur.nilai) {
+          cur.nilai = src.nilai;
+          changed = true;
+        }
+        if (src.catatan && cur.catatan !== src.catatan) {
+          cur.catatan = src.catatan;
+          changed = true;
+        }
+      } else {
+        const copy = { ...src };
+        if (!copy.id) copy.id = 'n-' + Date.now() + '-' + Math.random().toString(36).substring(2, 7);
+        if (!copy.guruEmail && sourceEmail) copy.guruEmail = sourceEmail;
+        targetDb.nilai.push(copy);
+        const newIdx = targetDb.nilai.length - 1;
+        if (copy.id) nilMap.set(String(copy.id), newIdx);
+        nilMap.set(composite, newIdx);
+        changed = true;
+      }
+    });
+  }
+
+  // 3. JURNAL MENGAJAR (Teaching Journals)
+  if (Array.isArray(sourceDb.jurnal) && sourceDb.jurnal.length > 0) {
+    targetDb.jurnal = targetDb.jurnal || [];
+    const jurMap = new Map();
+    targetDb.jurnal.forEach((j, idx) => {
+      if (!j) return;
+      if (j.id) jurMap.set(String(j.id), idx);
+      const composite = String(j.kelasId || '') + '_' + String(j.tanggal || '') + '_' + String(j.mapel || '') + '_' + String(j.jamKe || '');
+      jurMap.set(composite, idx);
+    });
+
+    sourceDb.jurnal.forEach(src => {
+      if (!src || !src.tanggal || !src.mapel) return;
+      if (src.id && deletedIds.has(String(src.id))) return;
+
+      const composite = String(src.kelasId || '') + '_' + String(src.tanggal || '') + '_' + String(src.mapel || '') + '_' + String(src.jamKe || '');
+      const existingIdx = (src.id && jurMap.has(String(src.id)))
+        ? jurMap.get(String(src.id))
+        : (jurMap.has(composite) ? jurMap.get(composite) : -1);
+
+      if (existingIdx === undefined || existingIdx === -1) {
+        const copy = { ...src };
+        if (!copy.id) copy.id = 'jur-' + Date.now() + '-' + Math.random().toString(36).substring(2, 7);
+        if (!copy.guruEmail && sourceEmail) copy.guruEmail = sourceEmail;
+        targetDb.jurnal.push(copy);
+        const newIdx = targetDb.jurnal.length - 1;
+        if (copy.id) jurMap.set(String(copy.id), newIdx);
+        jurMap.set(composite, newIdx);
+        changed = true;
+      }
+    });
+  }
+
+  // 4. CATATAN KASUS & PEMBINAAN WALI KELAS (db.catatanWali)
+  if (Array.isArray(sourceDb.catatanWali) && sourceDb.catatanWali.length > 0) {
+    targetDb.catatanWali = targetDb.catatanWali || [];
+    const cwMap = new Set(targetDb.catatanWali.map(c => String(c.id)));
+    sourceDb.catatanWali.forEach(src => {
+      if (!src || !src.id || cwMap.has(String(src.id))) return;
+      targetDb.catatanWali.push({ ...src });
+      cwMap.add(String(src.id));
+      changed = true;
+    });
+  }
+
+  // 5. JURNAL BIMBINGAN GURU WALI (db.jurnalBimbingan)
+  if (Array.isArray(sourceDb.jurnalBimbingan) && sourceDb.jurnalBimbingan.length > 0) {
+    targetDb.jurnalBimbingan = targetDb.jurnalBimbingan || [];
+    const jbMap = new Set(targetDb.jurnalBimbingan.map(j => String(j.id)));
+    sourceDb.jurnalBimbingan.forEach(src => {
+      if (!src || !src.id || jbMap.has(String(src.id))) return;
+      targetDb.jurnalBimbingan.push({ ...src });
+      jbMap.add(String(src.id));
+      changed = true;
+    });
+  }
+
+  // 6. LAYANAN & AGENDA BK (db.layananBK, db.agendaBK)
+  if (Array.isArray(sourceDb.layananBK) && sourceDb.layananBK.length > 0) {
+    targetDb.layananBK = targetDb.layananBK || [];
+    const lbkMap = new Set(targetDb.layananBK.map(l => String(l.id)));
+    sourceDb.layananBK.forEach(src => {
+      if (!src || !src.id || lbkMap.has(String(src.id))) return;
+      targetDb.layananBK.push({ ...src });
+      lbkMap.add(String(src.id));
+      changed = true;
+    });
+  }
+  if (Array.isArray(sourceDb.agendaBK) && sourceDb.agendaBK.length > 0) {
+    targetDb.agendaBK = targetDb.agendaBK || [];
+    const abkMap = new Set(targetDb.agendaBK.map(a => String(a.id)));
+    sourceDb.agendaBK.forEach(src => {
+      if (!src || !src.id || abkMap.has(String(src.id))) return;
+      targetDb.agendaBK.push({ ...src });
+      abkMap.add(String(src.id));
+      changed = true;
+    });
+  }
+
+  // 7. KONTAK WALI MURID (db.kontakWali)
+  if (Array.isArray(sourceDb.kontakWali) && sourceDb.kontakWali.length > 0) {
+    targetDb.kontakWali = targetDb.kontakWali || [];
+    sourceDb.kontakWali.forEach(srcKw => {
+      if (!srcKw) return;
+      const validPhone = (!/[a-zA-Z]/.test(srcKw.noHp || "") && String(srcKw.noHp || "").replace(/\D/g, '').length >= 7) ? srcKw.noHp : "";
+      const existingKw = targetDb.kontakWali.find(k => {
+        if (srcKw.nisn && srcKw.nisn !== "-" && k.nisn && k.nisn !== "-") {
+          return String(srcKw.nisn).trim() === String(k.nisn).trim();
+        }
+        return srcKw.namaSiswa && k.namaSiswa && srcKw.namaSiswa.trim().toLowerCase() === k.namaSiswa.trim().toLowerCase();
+      });
+      if (existingKw) {
+        if (validPhone && existingKw.noHp !== validPhone) { existingKw.noHp = validPhone; changed = true; }
+        if (srcKw.namaWali && (!existingKw.namaWali || existingKw.namaWali === "-")) { existingKw.namaWali = srcKw.namaWali; changed = true; }
+      } else if (srcKw.namaSiswa) {
+        targetDb.kontakWali.push({ ...srcKw });
+        changed = true;
+      }
+    });
+  }
+
+  // 8. MASTER KELAS & SISWA
+  if (Array.isArray(sourceDb.kelas) && sourceDb.kelas.length > 0) {
+    targetDb.kelas = targetDb.kelas || [];
+    sourceDb.kelas.forEach(srcK => {
+      if (!srcK || !srcK.id) return;
+      const existK = targetDb.kelas.find(k => String(k.id) === String(srcK.id) || normalizeClassName(k.nama) === normalizeClassName(srcK.nama));
+      if (!existK) {
+        targetDb.kelas.push({ ...srcK });
+        changed = true;
+      } else {
+        if (srcK.waliKelas && !existK.waliKelas) { existK.waliKelas = srcK.waliKelas; changed = true; }
+        if (srcK.waliKelasEmail && !existK.waliKelasEmail) { existK.waliKelasEmail = srcK.waliKelasEmail; changed = true; }
+      }
+    });
+  }
+
+  if (Array.isArray(sourceDb.siswa) && sourceDb.siswa.length > 0) {
+    targetDb.siswa = targetDb.siswa || [];
+    const siswaMap = new Map();
+    targetDb.siswa.forEach((s, idx) => {
+      if (!s) return;
+      if (s.id) siswaMap.set(String(s.id), idx);
+      if (s.nisn && s.nisn !== "-") siswaMap.set(String(s.nisn).trim(), idx);
+    });
+
+    sourceDb.siswa.forEach(srcS => {
+      if (!srcS || !srcS.nama) return;
+      const existIdx = (srcS.id && siswaMap.has(String(srcS.id)))
+        ? siswaMap.get(String(srcS.id))
+        : (srcS.nisn && srcS.nisn !== "-" && siswaMap.has(String(srcS.nisn).trim()) ? siswaMap.get(String(srcS.nisn).trim()) : -1);
+
+      if (existIdx === -1 || existIdx === undefined) {
+        targetDb.siswa.push({ ...srcS });
+        const newIdx = targetDb.siswa.length - 1;
+        if (srcS.id) siswaMap.set(String(srcS.id), newIdx);
+        if (srcS.nisn && srcS.nisn !== "-") siswaMap.set(String(srcS.nisn).trim(), newIdx);
+        changed = true;
+      } else {
+        const curS = targetDb.siswa[existIdx];
+        if (srcS.noHp && curS.noHp !== srcS.noHp) { curS.noHp = srcS.noHp; changed = true; }
+        if (srcS.namaWali && (!curS.namaWali || curS.namaWali === "-")) { curS.namaWali = srcS.namaWali; changed = true; }
+      }
+    });
+  }
+
+  return changed;
+}
+
+function syncCrossAccountDataLocally(currentDb, userSchool) {
+  if (!currentDb || typeof currentDb !== 'object') return false;
+  let anyMerged = false;
+
+  try {
+    const sharedRaw = localStorage.getItem(SHARED_SCHOOL_DATA_KEY);
+    if (sharedRaw) {
+      try {
+        const sharedData = JSON.parse(sharedRaw);
+        if (sharedData && isSameSchool(sharedData.school || userSchool, userSchool)) {
+          if (mergeSchoolSharedRecords(currentDb, sharedData, "shared_cache")) {
+            anyMerged = true;
+          }
+        }
+      } catch(e) {}
+    }
+
+    const currentDbKey = getDbKey();
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith("saku_guru_db_") && key !== currentDbKey) {
+        const otherRaw = localStorage.getItem(key);
+        if (otherRaw) {
+          try {
+            const otherDb = JSON.parse(otherRaw);
+            if (otherDb && typeof otherDb === 'object') {
+              const otherSchool = (otherDb.guruProfile && otherDb.guruProfile.sekolah) ? otherDb.guruProfile.sekolah : "";
+              if (isSameSchool(otherSchool || userSchool, userSchool)) {
+                const otherEmail = key.replace("saku_guru_db_", "").replace(/_/g, ".");
+                if (mergeSchoolSharedRecords(currentDb, otherDb, otherEmail)) {
+                  anyMerged = true;
+                }
+              }
+            }
+          } catch(err) {}
+        }
+      }
+    }
+
+    if (anyMerged) {
+      currentDb.last_updated = new Date().toISOString();
+      try {
+        localStorage.setItem(currentDbKey, JSON.stringify(currentDb));
+        localStorage.setItem(SHARED_SCHOOL_DATA_KEY, JSON.stringify(extractSharedSchoolData(currentDb, userSchool)));
+      } catch(e) {}
+    }
+  } catch(e) {
+    console.warn("syncCrossAccountDataLocally error:", e);
+  }
+
+  return anyMerged;
+}
+
+async function syncCrossAccountDataFromCloud(currentDb, userSchool, notify = false) {
+  if (!isCloudMode || !supabase) return false;
+  if (!currentDb || typeof currentDb !== 'object') return false;
+
+  const session = getSession();
+  const currentEmail = (session && session.email) ? session.email.trim().toLowerCase() : "";
+
+  try {
+    const { data: allDbs, error } = await supabase
+      .from("saku_guru_databases")
+      .select("email, data, updated_at");
+
+    if (error || !Array.isArray(allDbs)) {
+      console.warn("Gagal mengambil database guru dari Cloud:", error);
+      return false;
+    }
+
+    let anyMerged = false;
+    let otherTeacherCount = 0;
+
+    for (const row of allDbs) {
+      if (!row || !row.data || typeof row.data !== 'object') continue;
+      const rowEmail = (row.email || "").trim().toLowerCase();
+      if (rowEmail === currentEmail) continue;
+
+      const rowDb = row.data;
+      const rowSchool = (rowDb.guruProfile && rowDb.guruProfile.sekolah) ? rowDb.guruProfile.sekolah.trim() : "";
+      if (!isSameSchool(rowSchool || userSchool, userSchool)) continue;
+
+      const merged = mergeSchoolSharedRecords(currentDb, rowDb, rowEmail);
+      if (merged) {
+        anyMerged = true;
+        otherTeacherCount++;
+      }
+    }
+
+    if (anyMerged) {
+      currentDb.last_updated = new Date().toISOString();
+      const dbKey = getDbKey();
+      try {
+        localStorage.setItem(dbKey, JSON.stringify(currentDb));
+        localStorage.setItem(SHARED_SCHOOL_DATA_KEY, JSON.stringify(extractSharedSchoolData(currentDb, userSchool)));
+      } catch(e) {}
+
+      if (currentEmail) {
+        await supabase.from("saku_guru_databases").upsert(
+          { email: currentEmail, data: currentDb, updated_at: new Date().toISOString() },
+          { onConflict: "email" }
+        );
+      }
+
+      if (notify) {
+        showToast(`Sinkronisasi berhasil! Data terupdate dari ${otherTeacherCount} akun guru.`);
+      }
+    }
+
+    return anyMerged;
+  } catch(e) {
+    console.warn("syncCrossAccountDataFromCloud error:", e);
+    return false;
+  }
+}
+
+async function finalizeDatabaseInit(masterClasses) {
+  cleanupLegacyDuplicateData(db);
+  syncMasterDataToTeacher(db, masterClasses);
+
+  // Sinkronisasi data antar-akun sekolah (Lokal & Cloud)
+  const userSchool = getCurrentSchoolName();
+  syncCrossAccountDataLocally(db, userSchool);
+  if (isCloudMode && supabase) {
+    try {
+      await syncCrossAccountDataFromCloud(db, userSchool, false);
+    } catch(err) {
+      console.warn("Cross-account cloud sync on init error:", err);
+    }
+  }
+
+  const session = getSession();
+  if (session && session.role !== "admin") {
+    try {
+      await syncAdminContactsToTeacher(db, userSchool, false);
+    } catch(e) {}
+  }
+
+  const dbKey = getDbKey();
+  try {
+    localStorage.setItem(dbKey, JSON.stringify(db));
+  } catch(e) {}
+
+  updateHeaderProfile();
 }
 
 // Database Initialization
@@ -1422,9 +2032,7 @@ async function initDatabase() {
         } else {
           await loadSeedData();
         }
-        cleanupLegacyDuplicateData(db);
-        syncMasterDataToTeacher(db, masterClasses);
-        updateHeaderProfile();
+        await finalizeDatabaseInit(masterClasses);
         return;
       }
 
@@ -1464,39 +2072,33 @@ async function initDatabase() {
               if (localDb.is_demo && !cloudDb.is_demo) {
                 console.log("Local database is demo data but cloud database is real. Syncing cloud to local instead.");
                 db = cloudDb;
-                cleanupLegacyDuplicateData(db);
-                syncMasterDataToTeacher(db, masterClasses);
                 try {
                   localStorage.setItem(dbKey, JSON.stringify(db));
                 } catch(e) {
                   console.error("Failed to sync cloud data to localStorage:", e);
                 }
-                updateHeaderProfile();
+                await finalizeDatabaseInit(masterClasses);
                 return;
               }
 
               if (localTime > cloudTime) {
                 console.log("Local database is newer than cloud. Syncing local to cloud.");
                 db = localDb;
-                cleanupLegacyDuplicateData(db);
-                syncMasterDataToTeacher(db, masterClasses);
                 await saveDatabase(false); // Upload local to cloud (no new mutation)
-                updateHeaderProfile();
+                await finalizeDatabaseInit(masterClasses);
                 return;
               }
             }
             
             console.log("Cloud database loaded and synchronized to local.");
             db = cloudDb;
-            cleanupLegacyDuplicateData(db);
-            syncMasterDataToTeacher(db, masterClasses);
             // Sync to local cache
             try {
               localStorage.setItem(dbKey, JSON.stringify(db));
             } catch(e) {
               console.error("Failed to sync cloud data to localStorage:", e);
             }
-            updateHeaderProfile();
+            await finalizeDatabaseInit(masterClasses);
             return;
           }
         }
@@ -1505,18 +2107,14 @@ async function initDatabase() {
         if (localDb) {
           console.log("No valid cloud database found, but local database exists. Syncing local to cloud.");
           db = localDb;
-          cleanupLegacyDuplicateData(db);
-          syncMasterDataToTeacher(db, masterClasses);
           await saveDatabase(false); // upload baseline only
-          updateHeaderProfile();
+          await finalizeDatabaseInit(masterClasses);
           return;
         }
         
         // No cloud data, no local data: load seeds
         await loadSeedData();
-        cleanupLegacyDuplicateData(db);
-        syncMasterDataToTeacher(db, masterClasses);
-        updateHeaderProfile();
+        await finalizeDatabaseInit(masterClasses);
         return;
       } else {
         console.warn("Supabase query error, falling back to local database:", error);
@@ -1525,9 +2123,7 @@ async function initDatabase() {
         } else {
           await loadSeedData();
         }
-        cleanupLegacyDuplicateData(db);
-        syncMasterDataToTeacher(db, masterClasses);
-        updateHeaderProfile();
+        await finalizeDatabaseInit(masterClasses);
         return;
       }
     } catch(e) {
@@ -1541,9 +2137,7 @@ async function initDatabase() {
   } else {
     await loadSeedData();
   }
-  cleanupLegacyDuplicateData(db);
-  syncMasterDataToTeacher(db, masterClasses);
-  updateHeaderProfile();
+  await finalizeDatabaseInit(masterClasses);
 }
 
 async function loadSeedData() {
@@ -1582,6 +2176,11 @@ async function saveDatabase(isMutation = true) {
   const dbKey = getDbKey();
   try {
     localStorage.setItem(dbKey, JSON.stringify(db));
+    if (isMutation) {
+      // Simpan ke cache bersama sekolah agar akun lokal lain langsung menerima mutasi ini
+      const schoolName = getCurrentSchoolName();
+      localStorage.setItem(SHARED_SCHOOL_DATA_KEY, JSON.stringify(extractSharedSchoolData(db, schoolName)));
+    }
   } catch(e) {
     console.error("Failed to save to localStorage:", e);
   }
@@ -1663,6 +2262,10 @@ async function syncWithCloud(notifyUser = false) {
 
   updateCloudSyncUI("syncing");
   try {
+    const userSchool = getCurrentSchoolName();
+    let hasNewChanges = false;
+
+    // 1. Tarik pembaruan akun sendiri jika cloud lebih baru
     const { data, error } = await supabase
       .from("saku_guru_databases")
       .select("data, updated_at")
@@ -1684,50 +2287,61 @@ async function syncWithCloud(notifyUser = false) {
       const cloudTime = Math.max(cloudTimeInDb, cloudTimeColumn);
 
       if (cloudTime > localTime) {
-        console.log("[Sync] Cloud data is newer. Pulling updates to current device...");
+        console.log("[Sync] Cloud data is newer for this account. Pulling updates...");
         db = cloudDb;
-        const dbKey = getDbKey();
-        try {
-          localStorage.setItem(dbKey, JSON.stringify(db));
-        } catch(e) {}
-        updateHeaderProfile();
-        
-        // Auto sync contacts from Administrator if this is a teacher account
-        if (session && session.role !== "admin") {
-          await syncAdminContactsToTeacher(db, getCurrentSchoolName(), false);
-        }
-
-        // Re-render current active view so user sees newest changes immediately
-        const activeNav = document.querySelector(".sidebar-menu li.active");
-        const activePage = activeNav ? activeNav.getAttribute("data-page") : "dashboard";
-        if (typeof renderPage === "function" && activePage) {
-          renderPage(activePage);
-        }
-        updateCloudSyncUI("synced");
-        if (notifyUser) showToast("Data terbaru dari perangkat lain berhasil dimuat!");
-        return;
+        hasNewChanges = true;
       } else if (localTime > cloudTime) {
         console.log("[Sync] Local data is newer. Pushing to Cloud...");
         await saveDatabase(false);
-        updateCloudSyncUI("synced");
-        if (notifyUser) showToast("Data berhasil diunggah ke Cloud!");
-        return;
       }
     }
 
-    // Auto sync contacts from Administrator if this is a teacher account
+    // 2. SINKRONISASI DATA ANTAR-AKUN GURU (Absensi, Nilai, Jurnal, dan Laporan)
+    const crossMerged = await syncCrossAccountDataFromCloud(db, userSchool, false);
+    if (crossMerged) {
+      hasNewChanges = true;
+    }
+
+    // 3. Sinkronkan kontak dari Administrator jika bukan akun admin
     if (session && session.role !== "admin") {
-      await syncAdminContactsToTeacher(db, getCurrentSchoolName(), false);
+      await syncAdminContactsToTeacher(db, userSchool, false);
+    }
+
+    const dbKey = getDbKey();
+    try {
+      localStorage.setItem(dbKey, JSON.stringify(db));
+    } catch(e) {}
+    updateHeaderProfile();
+
+    if (hasNewChanges) {
+      // Re-render current active view so user sees newest changes immediately
+      const activeNav = document.querySelector(".sidebar-menu li.active");
+      const activePage = activeNav ? activeNav.getAttribute("data-page") : "dashboard";
+      if (typeof renderPage === "function" && activePage) {
+        renderPage(activePage);
+      }
+      updateCloudSyncUI("synced");
+      if (notifyUser) {
+        showToast("Sinkronisasi berhasil! Data absensi & penilaian dari seluruh guru telah terupdate.");
+      }
+      return;
     }
 
     updateCloudSyncUI("synced");
-    if (notifyUser) showToast("Data sudah sinkron antara Web & Android!");
+    if (notifyUser) showToast("Data sudah sinkron antara seluruh akun guru!");
   } catch(e) {
     console.warn("Sync error:", e);
     updateCloudSyncUI("offline");
     if (notifyUser) showToast("Mode Offline: Data tersimpan aman di perangkat.");
   }
 }
+
+// Auto sync periodically every 60 seconds if online
+setInterval(() => {
+  if (isLoggedIn() && isCloudMode && navigator.onLine) {
+    syncWithCloud(false).catch(e => console.warn("Periodic sync error:", e));
+  }
+}, 60000);
 
 // Auto sync when user switches tabs or returns to the app
 window.addEventListener("focus", () => {
@@ -1964,6 +2578,487 @@ function closeModal() {
   }
 }
 
+// ============================================================================
+// STUDENT SEARCHABLE COMBOBOX (DROPDOWN + KETIK MANUAL SISWA)
+// ============================================================================
+window._studentComboboxRegistry = window._studentComboboxRegistry || {};
+
+function escapeRegExp(str) {
+  return (str || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function renderStudentComboboxHtml(config) {
+  const {
+    id = "combobox-siswa",
+    students = [],
+    selectedId = "",
+    manualName = "",
+    placeholder = "Ketik nama siswa / NISN, atau klik panah untuk memilih...",
+    required = true,
+    label = "Pilih Siswa: *"
+  } = config;
+
+  let displayName = "";
+  let initialKelasId = "";
+  let isManual = false;
+
+  const found = (students || []).find(s => s.id === selectedId);
+  if (found) {
+    const k = (db.kelas || []).find(cl => cl.id === found.kelasId) || { nama: "-" };
+    displayName = `${found.nama} (${k.nama})`;
+    initialKelasId = found.kelasId || "";
+  } else if (manualName) {
+    displayName = manualName;
+    isManual = true;
+  }
+
+  const statusText = found ? 
+    `<span style="color:#10b981; font-weight:600;"><i class="fas fa-check-circle"></i> Terdaftar di database: <strong>${escapeHtml(found.nama)}</strong> (${escapeHtml(((db.kelas || []).find(cl => cl.id === found.kelasId) || {}).nama || '-')} • NISN: ${escapeHtml(found.nisn || '-')})</span>` :
+    (isManual ? 
+      `<span style="color:#f59e0b; font-weight:600;"><i class="fas fa-pen-to-square"></i> Siswa Manual: <strong>${escapeHtml(manualName)}</strong></span>` :
+      `<span style="color:var(--text-muted);"><i class="fas fa-info-circle"></i> Bisa ketik nama siswa untuk mencari, ketik manual, atau klik ▾ untuk daftar lengkap.</span>`
+    );
+
+  return `
+    <div class="form-group student-combobox-wrapper" id="wrapper-${id}" style="margin-bottom: 12px; position: relative;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+        <label for="${id}-input" style="font-weight: 700; font-size: 0.85rem; margin: 0;">${label}</label>
+        <span style="font-size: 0.72rem; color: var(--text-muted); display: inline-flex; align-items: center; gap: 4px;">
+          <i class="fas fa-keyboard"></i> Ketik manual / Dropdown
+        </span>
+      </div>
+
+      <div class="student-combobox-input-group" style="position: relative;">
+        <input 
+          type="text" 
+          id="${id}-input" 
+          class="form-control student-combobox-input" 
+          placeholder="${placeholder}" 
+          value="${escapeHtml(displayName)}"
+          autocomplete="off"
+          spellcheck="false"
+          ${required ? 'required' : ''}
+          style="font-weight: 600; padding-right: 72px;"
+          onfocus="handleStudentComboboxFocus('${id}')"
+          oninput="handleStudentComboboxInput('${id}')"
+          onkeydown="handleStudentComboboxKeydown(event, '${id}')"
+        >
+        <div class="student-combobox-actions" style="position: absolute; right: 8px; top: 50%; transform: translateY(-50%); display: flex; align-items: center; gap: 2px; z-index: 5;">
+          <button 
+            type="button" 
+            class="student-combobox-btn" 
+            id="${id}-btn-clear" 
+            onclick="clearStudentCombobox('${id}')"
+            title="Hapus / Kosongkan"
+            style="display: ${displayName ? 'inline-flex' : 'none'}; background: none; border: none; color: var(--text-muted); cursor: pointer; padding: 4px 6px; font-size: 0.85rem;"
+          >
+            <i class="fas fa-times-circle"></i>
+          </button>
+          <button 
+            type="button" 
+            class="student-combobox-btn" 
+            id="${id}-btn-toggle" 
+            onclick="toggleStudentComboboxDropdown('${id}')"
+            title="Buka / Tutup Daftar Siswa"
+            style="background: none; border: none; color: var(--text-muted); cursor: pointer; padding: 4px 6px; font-size: 0.85rem; transition: transform 0.2s;"
+          >
+            <i class="fas fa-chevron-down" id="${id}-chevron"></i>
+          </button>
+        </div>
+
+        <!-- Floating Dropdown list panel positioned relative to input group -->
+        <div 
+          id="${id}-dropdown" 
+          class="student-combobox-dropdown" 
+          style="display: none; position: absolute; top: calc(100% + 4px); left: 0; right: 0; max-height: 240px; overflow-y: auto; background: var(--bg-card, #ffffff); border: 1px solid var(--border-color, #e2e8f0); border-radius: 8px; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.25); z-index: 1050; padding: 4px;"
+        >
+        </div>
+      </div>
+
+      <!-- Hidden inputs storing actual data -->
+      <input type="hidden" id="${id}" value="${escapeHtml(selectedId)}">
+      <input type="hidden" id="${id}-nama" value="${escapeHtml(found ? found.nama : manualName)}">
+      <input type="hidden" id="${id}-kelas" value="${escapeHtml(initialKelasId)}">
+
+      <!-- Status helper badge -->
+      <div id="${id}-status" class="student-combobox-status" style="margin-top: 5px; font-size: 0.76rem; display: flex; align-items: center; justify-content: space-between; padding: 4px 8px; border-radius: 6px; background: var(--bg-app); border: 1px solid var(--border-color);">
+        ${statusText}
+      </div>
+    </div>
+  `;
+}
+
+function initStudentCombobox(id, students = []) {
+  window._studentComboboxRegistry[id] = {
+    students: students || [],
+    activeIndex: -1,
+    filteredList: []
+  };
+
+  // Add click outside listener once globally
+  if (!window._comboboxOutsideClickListener) {
+    window._comboboxOutsideClickListener = function(e) {
+      Object.keys(window._studentComboboxRegistry).forEach(comboboxId => {
+        const wrapper = document.getElementById(`wrapper-${comboboxId}`);
+        const dropdown = document.getElementById(`${comboboxId}-dropdown`);
+        if (wrapper && dropdown && dropdown.style.display !== 'none') {
+          if (!wrapper.contains(e.target)) {
+            closeStudentComboboxDropdown(comboboxId);
+          }
+        }
+      });
+    };
+    document.addEventListener("mousedown", window._comboboxOutsideClickListener);
+    document.addEventListener("touchstart", window._comboboxOutsideClickListener);
+  }
+}
+
+function toggleStudentComboboxDropdown(id) {
+  const dropdown = document.getElementById(`${id}-dropdown`);
+  if (!dropdown) return;
+  if (dropdown.style.display === 'none' || !dropdown.style.display) {
+    openStudentComboboxDropdown(id);
+    const input = document.getElementById(`${id}-input`);
+    if (input) input.focus();
+  } else {
+    closeStudentComboboxDropdown(id);
+  }
+}
+
+function handleStudentComboboxFocus(id) {
+  openStudentComboboxDropdown(id);
+  const input = document.getElementById(`${id}-input`);
+  if (input) {
+    setTimeout(() => {
+      try { input.select(); } catch(e) {}
+    }, 50);
+  }
+}
+
+function handleStudentComboboxInput(id) {
+  const input = document.getElementById(`${id}-input`);
+  const clearBtn = document.getElementById(`${id}-btn-clear`);
+  if (!input) return;
+
+  const val = input.value;
+  if (clearBtn) {
+    clearBtn.style.display = val ? 'inline-flex' : 'none';
+  }
+
+  openStudentComboboxDropdown(id, val);
+}
+
+function openStudentComboboxDropdown(id, query = null) {
+  const dropdown = document.getElementById(`${id}-dropdown`);
+  const chevron = document.getElementById(`${id}-chevron`);
+  const input = document.getElementById(`${id}-input`);
+  if (!dropdown || !input) return;
+
+  dropdown.style.display = 'block';
+  if (chevron) chevron.style.transform = 'rotate(180deg)';
+
+  const q = query !== null ? query : input.value;
+  renderStudentComboboxItems(id, q);
+}
+
+function closeStudentComboboxDropdown(id) {
+  const dropdown = document.getElementById(`${id}-dropdown`);
+  const chevron = document.getElementById(`${id}-chevron`);
+  const input = document.getElementById(`${id}-input`);
+  if (!dropdown) return;
+
+  dropdown.style.display = 'none';
+  if (chevron) chevron.style.transform = 'rotate(0deg)';
+
+  if (input) {
+    const text = input.value.trim();
+    const hiddenId = document.getElementById(id);
+    const hiddenNama = document.getElementById(`${id}-nama`);
+    const reg = window._studentComboboxRegistry[id];
+    const students = reg ? reg.students : (db.siswa || []);
+
+    if (!text) {
+      if (hiddenId) hiddenId.value = "";
+      if (hiddenNama) hiddenNama.value = "";
+      updateStudentComboboxStatus(id, null, "");
+      return;
+    }
+
+    const match = students.find(s => {
+      const k = (db.kelas || []).find(cl => cl.id === s.kelasId) || { nama: "" };
+      return s.nama.toLowerCase() === text.toLowerCase() || 
+             `${s.nama} (${k.nama})`.toLowerCase() === text.toLowerCase() ||
+             (s.nisn && s.nisn === text);
+    });
+
+    if (match) {
+      selectStudentComboboxItem(id, match.id);
+    } else {
+      if (!hiddenId.value || hiddenId.value.startsWith("manual_") || (hiddenNama && hiddenNama.value !== text)) {
+        selectStudentComboboxManual(id, text);
+      }
+    }
+  }
+}
+
+function renderStudentComboboxItems(id, query = "") {
+  const reg = window._studentComboboxRegistry[id];
+  const students = reg ? reg.students : (db.siswa || []);
+  const q = (query || "").trim().toLowerCase();
+
+  let matches = [];
+  if (!q) {
+    matches = [...students];
+  } else {
+    matches = students.filter(s => {
+      const k = (db.kelas || []).find(cl => cl.id === s.kelasId) || { nama: "" };
+      return s.nama.toLowerCase().includes(q) ||
+             (s.nisn && s.nisn.toLowerCase().includes(q)) ||
+             k.nama.toLowerCase().includes(q);
+    });
+  }
+
+  if (reg) {
+    reg.filteredList = matches;
+    reg.activeIndex = -1;
+  }
+
+  let html = "";
+
+  if (q) {
+    const safeQ = escapeHtml(query.trim());
+    html += `
+      <div 
+        class="student-combobox-item" 
+        onclick="selectStudentComboboxManual('${id}', '${safeQ.replace(/'/g, "\\'")}')"
+        style="background: rgba(249, 115, 22, 0.08); border: 1px dashed rgba(249, 115, 22, 0.4); margin-bottom: 4px; color: #ea580c; font-weight: 600;"
+      >
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <i class="fas fa-pen-to-square"></i>
+          <div>
+            <div>Gunakan Nama Manual: <strong>"${safeQ}"</strong></div>
+            <div style="font-size: 0.72rem; color: var(--text-muted); font-weight: normal;">Ketik bebas siswa di luar database</div>
+          </div>
+        </div>
+        <span class="student-combobox-badge" style="background: rgba(249, 115, 22, 0.15); color: #ea580c; border: none;">Manual</span>
+      </div>
+    `;
+  }
+
+  if (matches.length === 0) {
+    html += `
+      <div style="padding: 12px; text-align: center; color: var(--text-muted); font-size: 0.8rem;">
+        <i class="fas fa-search" style="opacity: 0.4; margin-bottom: 4px; display: block; font-size: 1.2rem;"></i>
+        Tidak ada siswa cocok dengan "<strong>${escapeHtml(query)}</strong>" di database.
+        <div style="margin-top: 4px; font-size: 0.74rem; color: #ea580c;">
+          Klik opsi "Gunakan Nama Manual" di atas untuk tetap menyimpan nama ini.
+        </div>
+      </div>
+    `;
+  } else {
+    const currentSelectedId = document.getElementById(id) ? document.getElementById(id).value : "";
+    const displayList = matches.slice(0, 50);
+
+    displayList.forEach((s, idx) => {
+      const k = (db.kelas || []).find(cl => cl.id === s.kelasId) || { nama: "-" };
+      const isSelected = s.id === currentSelectedId;
+
+      let highlightedName = escapeHtml(s.nama);
+      if (q) {
+        const regex = new RegExp(`(${escapeRegExp(q)})`, 'gi');
+        highlightedName = highlightedName.replace(regex, '<mark style="background: rgba(249, 115, 22, 0.25); color: inherit; padding: 0 2px; border-radius: 2px;">$1</mark>');
+      }
+
+      html += `
+        <div 
+          class="student-combobox-item ${isSelected ? 'selected' : ''}" 
+          id="${id}-item-${idx}"
+          data-index="${idx}"
+          onclick="selectStudentComboboxItem('${id}', '${s.id}')"
+          style="display: flex; align-items: center; justify-content: space-between; padding: 8px 10px; border-radius: 6px; cursor: pointer; transition: background 0.15s; ${isSelected ? 'background: rgba(249, 115, 22, 0.12); font-weight: 700;' : ''}"
+          onmouseenter="highlightStudentComboboxItem('${id}', ${idx})"
+        >
+          <div style="display: flex; flex-direction: column;">
+            <div style="font-size: 0.84rem; color: var(--text-main);">
+              ${highlightedName}
+            </div>
+            <div style="font-size: 0.72rem; color: var(--text-muted);">
+              NISN: ${escapeHtml(s.nisn || '-')}
+            </div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 6px;">
+            <span class="student-combobox-badge" style="font-size: 0.72rem; padding: 2px 6px; border-radius: 4px; background: var(--bg-app); border: 1px solid var(--border-color); color: var(--text-muted); font-weight: 600;">
+              ${escapeHtml(k.nama)}
+            </span>
+            ${isSelected ? '<i class="fas fa-check" style="color: #ea580c; font-size: 0.8rem;"></i>' : ''}
+          </div>
+        </div>
+      `;
+    });
+
+    if (matches.length > 50) {
+      html += `
+        <div style="padding: 6px 10px; text-align: center; color: var(--text-muted); font-size: 0.74rem; border-top: 1px solid var(--border-color);">
+          Menampilkan 50 dari ${matches.length} siswa. Ketik untuk menyaring lebih spesifik.
+        </div>
+      `;
+    }
+  }
+
+  const dropdown = document.getElementById(`${id}-dropdown`);
+  if (dropdown) {
+    dropdown.innerHTML = html;
+  }
+}
+
+function selectStudentComboboxItem(id, studentId) {
+  const reg = window._studentComboboxRegistry[id];
+  const students = reg ? reg.students : (db.siswa || []);
+  const s = students.find(x => x.id === studentId);
+  if (!s) return;
+
+  const k = (db.kelas || []).find(cl => cl.id === s.kelasId) || { nama: "-" };
+
+  const input = document.getElementById(`${id}-input`);
+  const hiddenId = document.getElementById(id);
+  const hiddenNama = document.getElementById(`${id}-nama`);
+  const hiddenKelas = document.getElementById(`${id}-kelas`);
+  const clearBtn = document.getElementById(`${id}-btn-clear`);
+
+  if (hiddenId) hiddenId.value = s.id;
+  if (hiddenNama) hiddenNama.value = s.nama;
+  if (hiddenKelas) hiddenKelas.value = s.kelasId || "";
+  if (input) input.value = `${s.nama} (${k.nama})`;
+  if (clearBtn) clearBtn.style.display = 'inline-flex';
+
+  updateStudentComboboxStatus(id, s, null);
+  closeStudentComboboxDropdown(id);
+}
+
+function selectStudentComboboxManual(id, manualName) {
+  const cleanName = (manualName || "").trim();
+  if (!cleanName) return;
+
+  const input = document.getElementById(`${id}-input`);
+  const hiddenId = document.getElementById(id);
+  const hiddenNama = document.getElementById(`${id}-nama`);
+  const hiddenKelas = document.getElementById(`${id}-kelas`);
+  const clearBtn = document.getElementById(`${id}-btn-clear`);
+
+  if (hiddenId) hiddenId.value = "manual_" + Date.now();
+  if (hiddenNama) hiddenNama.value = cleanName;
+  if (hiddenKelas) hiddenKelas.value = "";
+  if (input) input.value = cleanName;
+  if (clearBtn) clearBtn.style.display = 'inline-flex';
+
+  updateStudentComboboxStatus(id, null, cleanName);
+  closeStudentComboboxDropdown(id);
+}
+
+function clearStudentCombobox(id) {
+  const input = document.getElementById(`${id}-input`);
+  const hiddenId = document.getElementById(id);
+  const hiddenNama = document.getElementById(`${id}-nama`);
+  const hiddenKelas = document.getElementById(`${id}-kelas`);
+  const clearBtn = document.getElementById(`${id}-btn-clear`);
+
+  if (hiddenId) hiddenId.value = "";
+  if (hiddenNama) hiddenNama.value = "";
+  if (hiddenKelas) hiddenKelas.value = "";
+  if (input) {
+    input.value = "";
+    input.focus();
+  }
+  if (clearBtn) clearBtn.style.display = 'none';
+
+  updateStudentComboboxStatus(id, null, "");
+  openStudentComboboxDropdown(id, "");
+}
+
+function updateStudentComboboxStatus(id, studentObj, manualName) {
+  const statusEl = document.getElementById(`${id}-status`);
+  if (!statusEl) return;
+
+  if (studentObj) {
+    const k = (db.kelas || []).find(cl => cl.id === studentObj.kelasId) || { nama: "-" };
+    statusEl.innerHTML = `<span style="color:#10b981; font-weight:600;"><i class="fas fa-check-circle"></i> Terdaftar di database: <strong>${escapeHtml(studentObj.nama)}</strong> (${escapeHtml(k.nama)} • NISN: ${escapeHtml(studentObj.nisn || '-')})</span>`;
+  } else if (manualName) {
+    statusEl.innerHTML = `<span style="color:#f59e0b; font-weight:600;"><i class="fas fa-pen-to-square"></i> Siswa Manual: <strong>${escapeHtml(manualName)}</strong> <span style="font-weight:normal; color:var(--text-muted);">(Di luar database sekolah)</span></span>`;
+  } else {
+    statusEl.innerHTML = `<span style="color:var(--text-muted);"><i class="fas fa-info-circle"></i> Silakan ketik nama siswa untuk mencari, ketik manual, atau klik ▾ untuk daftar dropdown.</span>`;
+  }
+}
+
+function handleStudentComboboxKeydown(event, id) {
+  const dropdown = document.getElementById(`${id}-dropdown`);
+  const reg = window._studentComboboxRegistry[id];
+
+  if (event.key === "Escape") {
+    closeStudentComboboxDropdown(id);
+    return;
+  }
+
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    if (!dropdown || dropdown.style.display === 'none') {
+      openStudentComboboxDropdown(id);
+      return;
+    }
+    if (reg && reg.filteredList && reg.filteredList.length > 0) {
+      reg.activeIndex = Math.min((reg.activeIndex || -1) + 1, Math.min(reg.filteredList.length - 1, 49));
+      updateComboboxActiveHighlight(id);
+    }
+    return;
+  }
+
+  if (event.key === "ArrowUp") {
+    event.preventDefault();
+    if (!dropdown || dropdown.style.display === 'none') return;
+    if (reg && reg.filteredList && reg.filteredList.length > 0) {
+      reg.activeIndex = Math.max((reg.activeIndex || 0) - 1, 0);
+      updateComboboxActiveHighlight(id);
+    }
+    return;
+  }
+
+  if (event.key === "Enter") {
+    if (dropdown && dropdown.style.display !== 'none') {
+      event.preventDefault();
+      if (reg && reg.activeIndex >= 0 && reg.filteredList[reg.activeIndex]) {
+        selectStudentComboboxItem(id, reg.filteredList[reg.activeIndex].id);
+      } else {
+        const input = document.getElementById(`${id}-input`);
+        const text = input ? input.value.trim() : "";
+        if (text) {
+          closeStudentComboboxDropdown(id);
+        }
+      }
+    }
+  }
+}
+
+function updateComboboxActiveHighlight(id) {
+  const reg = window._studentComboboxRegistry[id];
+  if (!reg) return;
+  const items = document.querySelectorAll(`#${id}-dropdown .student-combobox-item[id^="${id}-item-"]`);
+  items.forEach((el, idx) => {
+    if (idx === reg.activeIndex) {
+      el.classList.add("active");
+      el.style.backgroundColor = "rgba(124, 58, 237, 0.15)";
+      el.scrollIntoView({ block: 'nearest' });
+    } else {
+      el.classList.remove("active");
+      el.style.backgroundColor = "";
+    }
+  });
+}
+
+function highlightStudentComboboxItem(id, index) {
+  const reg = window._studentComboboxRegistry[id];
+  if (reg) reg.activeIndex = index;
+  updateComboboxActiveHighlight(id);
+}
+
 // Modal Form Submit Handlers
 // (These are triggered by buttons in the modals)
 
@@ -1974,25 +3069,31 @@ function renderPage(pageId) {
   const subtitleEl = document.getElementById("view-subtitle");
   
   switch(pageId) {
-    case "dashboard":
+    case "dashboard": {
+      // Defaultkan seluruh tampilan laporan dashboard ke HARI INI
+      const todayStr = getLocalDateString();
+      window.activeDashboardInterventionDate = todayStr;
+      currentWaliKelasDate = todayStr;
+
       if (currentAppMode === "walikelas") {
         titleEl.textContent = "Dashboard Wali Kelas";
-        subtitleEl.textContent = "Rekapitulasi presensi final, radar siswa bermasalah, dan komunikasi wali murid.";
+        subtitleEl.textContent = `Laporan presensi hari ini (${formatDateIndo(todayStr)}), radar siswa bermasalah, dan komunikasi wali murid.`;
         renderDashboardWaliKelas(container);
       } else if (currentAppMode === "guruwali") {
         titleEl.textContent = "Dashboard Guru Wali";
-        subtitleEl.textContent = "Pendampingan siswa asuhan, catatan bimbingan konseling, dan pemantauan karakter.";
+        subtitleEl.textContent = `Laporan hari ini (${formatDateIndo(todayStr)}), pendampingan siswa asuhan, dan catatan bimbingan.`;
         renderDashboardGuruWali(container);
       } else if (currentAppMode === "gurubk") {
         titleEl.textContent = "Dashboard Guru BK";
-        subtitleEl.textContent = "Pusat bimbingan konseling, pemantauan kasus siswa, dan pendampingan karir.";
+        subtitleEl.textContent = `Laporan hari ini (${formatDateIndo(todayStr)}), pemantauan kasus siswa, dan layanan bimbingan konseling.`;
         renderDashboardGuruBK(container);
       } else {
         titleEl.textContent = "Dashboard";
-        subtitleEl.textContent = "Ringkasan aktivitas dan administrasi Anda hari ini.";
+        subtitleEl.textContent = `Ringkasan aktivitas dan laporan administrasi Anda hari ini (${formatDateIndo(todayStr)}).`;
         renderDashboard(container);
       }
       break;
+    }
     case "kelas_bimbingan":
       titleEl.textContent = "Kelas yang Dibimbing (Binaan BK)";
       subtitleEl.textContent = "Kelola rombongan belajar / tingkat kelas yang menjadi tanggung jawab bimbingan dan konseling.";
@@ -2126,20 +3227,26 @@ function renderDashboard(container) {
   const totalKelas = db.kelas.length;
   const totalSiswa = db.siswa.length;
   
-  // Attendance calculations for today or latest day
+  // Tanggal default laporan: HARI INI
   const todayStr = getLocalDateString();
-  const todayAbsensi = db.absensi.filter(a => a.tanggal === todayStr);
+  window.activeDashboardInterventionDate = todayStr;
+
+  const todayAbsensi = (db.absensi || []).filter(a => a.tanggal === todayStr);
   let attendanceRate = 0;
+  let todayHadirCount = 0;
+  let todayIssuesCount = 0;
+
   if (todayAbsensi.length > 0) {
-    const present = todayAbsensi.filter(a => a.status === "Hadir" || a.status === "Terlambat").length;
-    attendanceRate = Math.round((present / todayAbsensi.length) * 100);
+    todayHadirCount = todayAbsensi.filter(a => a.status === "Hadir" || a.status === "Terlambat").length;
+    todayIssuesCount = todayAbsensi.filter(a => ["Alpa", "Bolos", "Sakit", "Izin"].includes(a.status)).length;
+    attendanceRate = Math.round((todayHadirCount / todayAbsensi.length) * 100);
   } else {
-    // Fallback to average rate overall
-    const allDates = [...new Set(db.absensi.map(a => a.tanggal))];
+    // Fallback to average rate overall if no attendance yet today
+    const allDates = [...new Set((db.absensi || []).map(a => a.tanggal))];
     if (allDates.length > 0) {
       let totalRateSum = 0;
       allDates.forEach(d => {
-        const dayAbs = db.absensi.filter(a => a.tanggal === d);
+        const dayAbs = (db.absensi || []).filter(a => a.tanggal === d);
         const present = dayAbs.filter(a => a.status === "Hadir" || a.status === "Terlambat").length;
         totalRateSum += (present / dayAbs.length);
       });
@@ -2147,13 +3254,19 @@ function renderDashboard(container) {
     }
   }
 
-  const totalJurnal = db.jurnal.length;
+  const totalJurnal = (db.jurnal || []).length;
+  const todayJurnal = (db.jurnal || []).filter(j => j.tanggal === todayStr).length;
 
   container.innerHTML = `
     <!-- Welcome Banner -->
     <div class="welcome-banner">
-      <h2>Selamat Datang di Sman_Saku!</h2>
-      <p>Aplikasi administrasi guru dalam satu genggaman. Kelola jadwal kelas, pantau kehadiran dan nilai siswa secara instan, serta catat jurnal mengajar harian Anda dengan mudah.</p>
+      <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 8px;">
+        <h2 style="margin: 0;">Selamat Datang di Sman_Saku!</h2>
+        <span class="badge" style="background: rgba(255, 255, 255, 0.22); color: #fff; font-size: 0.8rem; padding: 5px 12px; border-radius: 20px; font-weight: 600; backdrop-filter: blur(8px);">
+          <i class="fas fa-calendar-day"></i> Laporan: ${formatDateIndoFull(todayStr)}
+        </span>
+      </div>
+      <p style="margin: 0; opacity: 0.95;">Aplikasi administrasi guru dalam satu genggaman. Pantau laporan kehadiran siswa hari ini, jadwal kelas terdekat, dan catat jurnal mengajar harian Anda secara terpadu.</p>
     </div>
 
     <!-- Stats Grid -->
@@ -2176,8 +3289,15 @@ function renderDashboard(container) {
       
       <div class="stat-card">
         <div class="stat-info">
-          <h3>Rata-rata Kehadiran</h3>
-          <div class="stat-value">${attendanceRate}%</div>
+          <h3>Kehadiran Hari Ini</h3>
+          <div class="stat-value" style="${todayAbsensi.length > 0 ? (attendanceRate >= 85 ? 'color: #10b981;' : 'color: #f59e0b;') : ''}">
+            ${todayAbsensi.length > 0 ? attendanceRate + '%' : (attendanceRate > 0 ? attendanceRate + '%*' : '0%')}
+          </div>
+          <div style="font-size: 0.73rem; color: var(--text-muted); margin-top: 3px;">
+            ${todayAbsensi.length > 0 
+              ? `<i class="fas fa-check-circle" style="color: #10b981;"></i> ${todayHadirCount}/${todayAbsensi.length} siswa hadir` 
+              : (attendanceRate > 0 ? `<i class="fas fa-info-circle"></i> *Rata-rata (Hari ini belum diisi)` : `<i class="fas fa-clock"></i> Belum diisi hari ini`)}
+          </div>
         </div>
         <div class="stat-icon"><i class="fas fa-clipboard-user"></i></div>
       </div>
@@ -2186,6 +3306,9 @@ function renderDashboard(container) {
         <div class="stat-info">
           <h3>Jurnal Mengajar</h3>
           <div class="stat-value">${totalJurnal}</div>
+          <div style="font-size: 0.73rem; color: var(--text-muted); margin-top: 3px;">
+            <i class="fas fa-book-open"></i> ${todayJurnal} dibuat hari ini
+          </div>
         </div>
         <div class="stat-icon"><i class="fas fa-book-open"></i></div>
       </div>
@@ -2272,8 +3395,8 @@ function renderDashboard(container) {
     </div>
   `;
 
-  // Render Student Attendance Intervention Panel
-  renderDashboardIntervention();
+  // Render Student Attendance Intervention Panel for Today
+  renderDashboardIntervention(todayStr);
 
   // Draw SVG Chart
   drawAttendanceChart();
@@ -2448,30 +3571,8 @@ function renderDashboardIntervention(targetDate = null) {
     scopedStudentIds = asuhanList.map(s => s.id);
   }
 
-  // Tanggal default
-  let dateToUse = targetDate || (mode === "walikelas" ? currentWaliKelasDate : window.activeDashboardInterventionDate);
-  if (!dateToUse) {
-    const dayHasRecords = (db.absensi || []).some(a => {
-      if (a.tanggal !== todayStr) return false;
-      if (scopedStudentIds) return scopedStudentIds.includes(a.siswaId);
-      return true;
-    });
-
-    if (dayHasRecords) {
-      dateToUse = todayStr;
-    } else {
-      // Cari tanggal terbaru dengan catatan masalah kehadiran
-      const datesWithIssues = [...new Set((db.absensi || [])
-        .filter(a => {
-          if (!["Alpa", "Bolos", "Terlambat", "Sakit", "Izin"].includes(a.status)) return false;
-          if (scopedStudentIds) return scopedStudentIds.includes(a.siswaId);
-          return true;
-        })
-        .map(a => a.tanggal))].sort().reverse();
-
-      dateToUse = datesWithIssues.length > 0 ? datesWithIssues[0] : todayStr;
-    }
-  }
+  // Tanggal default: SELALU UTAMAKAN LAPORAN HARI INI SECARA DEFAULT
+  let dateToUse = targetDate || (mode === "walikelas" ? currentWaliKelasDate : window.activeDashboardInterventionDate) || todayStr;
 
   window.activeDashboardInterventionDate = dateToUse;
   if (mode === "walikelas") {
@@ -2858,9 +3959,13 @@ function renderDashboardIntervention(targetDate = null) {
           </div>
           ${dateToUse !== todayStr ? `
             <button class="btn btn-secondary btn-sm" onclick="changeDashboardInterventionDate('${todayStr}')" style="font-size: 0.75rem; padding: 4px 8px;">
-              <i class="fas fa-calendar-day"></i> Hari Ini
+              <i class="fas fa-calendar-day"></i> Kembali ke Hari Ini
             </button>
-          ` : ''}
+          ` : `
+            <span class="badge badge-hadir" style="font-size: 0.75rem; padding: 5px 9px;">
+              <i class="fas fa-check-circle"></i> Laporan Hari Ini
+            </span>
+          `}
           ${latestOtherDate && dateToUse !== latestOtherDate ? `
             <button class="btn btn-secondary btn-sm" onclick="changeDashboardInterventionDate('${latestOtherDate}')" style="font-size: 0.75rem; padding: 4px 8px;" title="Lihat tanggal terakhir dengan catatan kendala kehadiran">
               <i class="fas fa-history"></i> ${formatDateIndo(latestOtherDate)}
@@ -4264,26 +5369,33 @@ function populateUpcomingSchedule() {
   const tbody = document.querySelector("#upcoming-schedule-table tbody");
   if (!tbody) return;
 
-  const daysOrder = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"];
+  const daysOrder = ["Minggu", "Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu"];
+  const todayDayIndex = new Date().getDay();
+  const todayDayName = daysOrder[todayDayIndex];
   
-  // Sort schedule by day and time
-  const sortedJadwal = [...db.jadwal].sort((a, b) => {
-    const dayDiff = daysOrder.indexOf(a.hari) - daysOrder.indexOf(b.hari);
-    if (dayDiff !== 0) return dayDiff;
-    return a.jamMulai.localeCompare(b.jamMulai);
+  // Urutkan jadwal mulai dari hari ini, lalu hari-hari berikutnya
+  const sortedJadwal = [...(db.jadwal || [])].sort((a, b) => {
+    const aIndex = (daysOrder.indexOf(a.hari) - todayDayIndex + 7) % 7;
+    const bIndex = (daysOrder.indexOf(b.hari) - todayDayIndex + 7) % 7;
+    if (aIndex !== bIndex) return aIndex - bIndex;
+    return (a.jamMulai || "").localeCompare(b.jamMulai || "");
   });
 
   if (sortedJadwal.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="4" style="text-align: center; color: var(--text-muted);">Belum ada jadwal mengajar.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="4" style="text-align: center; color: var(--text-muted); padding: 16px;">Belum ada jadwal mengajar.</td></tr>`;
     return;
   }
 
   tbody.innerHTML = sortedJadwal.slice(0, 5).map(j => {
-    const kelasObj = db.kelas.find(k => k.id === j.kelasId);
+    const kelasObj = (db.kelas || []).find(k => k.id === j.kelasId);
     const kelasNama = kelasObj ? kelasObj.nama : "Tidak Diketahui";
+    const isToday = (j.hari === todayDayName);
     return `
-      <tr>
-        <td><strong>${j.hari}</strong></td>
+      <tr style="${isToday ? 'background: rgba(124, 58, 237, 0.06); font-weight: 500;' : ''}">
+        <td>
+          <strong>${j.hari}</strong>
+          ${isToday ? '<span class="badge badge-hadir" style="font-size: 0.65rem; padding: 2px 6px; margin-left: 4px;"><i class="fas fa-clock"></i> Hari Ini</span>' : ''}
+        </td>
         <td>${j.jamMulai} - ${j.jamSelesai}</td>
         <td><span class="badge badge-izin">${kelasNama}</span></td>
         <td>${j.mapel}</td>
@@ -9743,6 +10855,10 @@ function submitAbsensiForm() {
   // Clear existing attendance for this class, date, and mapel
   db.absensi = db.absensi.filter(a => !(a.tanggal === tanggal && a.kelasId === kelasId && a.mapel === mapel));
 
+  const curSession = getSession();
+  const guruNama = (db.guruProfile && db.guruProfile.nama) ? db.guruProfile.nama : "";
+  const guruEmail = (curSession && curSession.email) ? curSession.email : "";
+
   rows.forEach(row => {
     const siswaId = row.getAttribute("data-siswa-id");
     const status = row.querySelector(`input[name="status-${siswaId}"]:checked`).value;
@@ -9754,6 +10870,9 @@ function submitAbsensiForm() {
       siswaId,
       status,
       mapel,
+      guru: guruNama,
+      guruEmail: guruEmail,
+      updatedAt: new Date().toISOString(),
       followUp: previousFollowUpMap[siswaId] || null
     });
   });
@@ -9969,6 +11088,11 @@ function deleteAbsensiSession(tanggal) {
   const mapel = document.getElementById("absensi-mapel-select").value;
   
   if (confirm(`Apakah Anda yakin ingin menghapus seluruh data absensi tanggal ${formatDateIndo(tanggal)}?`)) {
+    const toDelete = (db.absensi || []).filter(a => (a.tanggal === tanggal && a.kelasId === kelasId && a.mapel === mapel));
+    db.deletedRecordIds = db.deletedRecordIds || [];
+    toDelete.forEach(a => {
+      if (a && a.id) db.deletedRecordIds.push({ id: a.id, deletedAt: new Date().toISOString() });
+    });
     db.absensi = db.absensi.filter(a => !(a.tanggal === tanggal && a.kelasId === kelasId && a.mapel === mapel));
     saveDatabase();
     loadAbsensiRiwayat();
@@ -10699,6 +11823,10 @@ function submitNilaiForm() {
   const inputs = document.querySelectorAll(".nilai-input");
   let savedCount = 0;
 
+  const curSession = getSession();
+  const guruNama = (db.guruProfile && db.guruProfile.nama) ? db.guruProfile.nama : "";
+  const guruEmail = (curSession && curSession.email) ? curSession.email : "";
+
   inputs.forEach(input => {
     const nilai = parseFloat(input.value);
     if (isNaN(nilai) || nilai < 0 || nilai > 100) return; // Skip empty or invalid
@@ -10714,6 +11842,9 @@ function submitNilaiForm() {
       jenis,
       label,
       nilai,
+      guru: guruNama,
+      guruEmail: guruEmail,
+      updatedAt: new Date().toISOString(),
       tanggal: todayStr
     });
     savedCount++;
@@ -10789,6 +11920,8 @@ function submitEditNilai() {
 // Delete a single nilai entry
 function deleteNilaiEntry(id) {
   if (confirm("Apakah Anda yakin ingin menghapus entri nilai ini?")) {
+    db.deletedRecordIds = db.deletedRecordIds || [];
+    db.deletedRecordIds.push({ id, deletedAt: new Date().toISOString() });
     db.nilai = db.nilai.filter(n => n.id !== id);
     saveDatabase();
     loadNilaiRiwayat();
@@ -11755,6 +12888,9 @@ function renderProfil(container) {
           
           <div class="form-group">
             <label class="form-label">Mata Pelajaran yang Diampu</label>
+            <p style="font-size: 0.8rem; color: var(--text-muted); margin: 2px 0 8px;">
+              Tentukan mata pelajaran yang Anda ajarkan sebagai Guru Mata Pelajaran (misal: Bahasa Indonesia). Pengaturan ini bersifat personal dan tidak akan menghapus mata pelajaran lain di kelas binaan atau sekolah.
+            </p>
             <div id="subject-inputs-container" style="display:flex; flex-direction:column; gap:8px; margin-bottom:10px;">
               <!-- Dynamic subject input lines will be added here -->
             </div>
@@ -11948,8 +13084,8 @@ function renderProfil(container) {
     </div>
   `;
 
-  // Inject current subjects
-  const subjects = db.mapel || [];
+  // Inject current teacher's taught subjects
+  const subjects = getTeacherAssignedSubjects();
   subjects.forEach(subj => {
     addSubjectInputField(subj);
   });
@@ -12574,20 +13710,32 @@ function submitProfile() {
 
   // Update profile and subjects in state
   db.guruProfile = { 
+    ...(db.guruProfile || {}),
     nama, 
     nip, 
     sekolah, 
     alamat,
     kepalaSekolah,
     kepalaSekolahNip,
-    foto,
-    logo,
-    mapel: subjects.slice(0, 2).join(", ") + (subjects.length > 2 ? "..." : "") 
+    foto: foto || (db.guruProfile ? db.guruProfile.foto : null),
+    logo: logo || (db.guruProfile ? db.guruProfile.logo : null),
+    mapel: subjects.join(", "),
+    mapelAmpu: subjects
   };
-  db.mapel = subjects;
+
+  // Pastikan master kurikulum sekolah tetap utuh dan mapel yang diampu guru tersimpan
+  ensureCompleteSchoolMapel(db);
+  subjects.forEach(s => {
+    if (s && !db.mapel.includes(s)) {
+      db.mapel.push(s);
+    }
+  });
 
   saveDatabase();
-  showToast("Profil dan sekolah berhasil disimpan!");
+  if (typeof updateHeaderProfile === "function") {
+    updateHeaderProfile();
+  }
+  showToast("Profil dan mata pelajaran yang diampu berhasil disimpan!");
 }
 
 function handleImageUpload(inputEl, type) {
@@ -12981,6 +14129,19 @@ function setAppMode(mode) {
   if (mode === "gurubk") toastMsg = "Beralih ke Mode Guru BK (Bimbingan Konseling)";
   showToast(toastMsg);
 
+  // Sinkronkan data terbaru saat beralih mode
+  const userSchool = getCurrentSchoolName();
+  syncCrossAccountDataLocally(db, userSchool);
+  if (isCloudMode && supabase) {
+    syncCrossAccountDataFromCloud(db, userSchool, false).then(updated => {
+      if (updated) {
+        const activeNav = document.querySelector(".sidebar-menu li.active");
+        const activePage = activeNav ? activeNav.getAttribute("data-page") : "dashboard";
+        if (typeof renderPage === "function" && activePage) renderPage(activePage);
+      }
+    }).catch(e => console.warn(e));
+  }
+
   navigate("dashboard");
 }
 
@@ -13282,9 +14443,18 @@ function renderDashboardWaliKelas(container) {
             `}
           </div>
           <div style="flex: 1 1 130px; min-width: 130px;">
-            <label style="font-size: 0.75rem; font-weight: 700; color: var(--text-muted); display: block; margin-bottom: 4px; text-transform: uppercase;">
-              <i class="fas fa-calendar-day"></i> Tanggal Presensi:
-            </label>
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+              <label style="font-size: 0.75rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase; margin: 0;">
+                <i class="fas fa-calendar-day"></i> Tanggal Presensi:
+              </label>
+              ${currentWaliKelasDate !== getLocalDateString() ? `
+                <button type="button" class="btn btn-secondary btn-sm" onclick="changeWaliKelasDate('${getLocalDateString()}')" style="padding: 1px 6px; font-size: 0.7rem;">
+                  Hari Ini
+                </button>
+              ` : `
+                <span class="badge badge-hadir" style="font-size: 0.68rem; padding: 1px 6px;">Hari Ini</span>
+              `}
+            </div>
             <input type="date" id="walikelas-date-input" class="form-control" style="width: 100%; min-width: 130px;" value="${currentWaliKelasDate}" onchange="changeWaliKelasDate(this.value)">
           </div>
         </div>
@@ -13911,7 +15081,7 @@ function renderLedgerNilaiWaliKelas(container) {
   const classId = getWaliKelasClassId();
   const kelas = db.kelas.find(k => k.id === classId) || { nama: "Kelas", tingkat: "-" };
   const students = getStudentsForClass(classId);
-  const mapelList = db.mapel || ["Matematika", "Fisika", "Kimia", "Biologi", "Bahasa Indonesia", "Bahasa Inggris"];
+  const mapelList = getWaliKelasMapelList(classId);
 
   // Hitung rata-rata per mapel untuk setiap siswa
   const ledgerData = students.map(s => {
@@ -13966,7 +15136,10 @@ function renderLedgerNilaiWaliKelas(container) {
             `}
           </div>
         </div>
-        <div style="display: flex; gap: 10px;">
+        <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+          <button type="button" class="btn btn-outline-primary" onclick="openModalAturMapelLedger('${classId}')" title="Sesuaikan daftar mata pelajaran kelas ini (MIPA, IPS, Bahasa, dll)">
+            <i class="fas fa-sliders-h"></i> Atur Mapel Kelas
+          </button>
           <button type="button" class="btn btn-secondary" onclick="window.print()">
             <i class="fas fa-print"></i> Cetak Ledger
           </button>
@@ -13980,9 +15153,20 @@ function renderLedgerNilaiWaliKelas(container) {
     <div class="card">
       <div class="card-header" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
         <div>
-          <h3 style="margin: 0; font-size: 1.1rem;"><i class="fas fa-table-list"></i> Ledger Nilai Multi-Mapel: Kelas ${kelas.nama}</h3>
+          <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+            <h3 style="margin: 0; font-size: 1.1rem;"><i class="fas fa-table-list"></i> Ledger Nilai Multi-Mapel: Kelas ${escapeHtml(kelas.nama)}</h3>
+            ${kelas.mapelLedger && Array.isArray(kelas.mapelLedger) && kelas.mapelLedger.length > 0 ? `
+              <span class="badge" style="background: rgba(16,185,129,0.12); color: #059669; border: 1px solid rgba(16,185,129,0.25); font-size: 0.75rem; padding: 3px 8px; border-radius: 6px;">
+                <i class="fas fa-check-circle"></i> Mapel Khusus (${kelas.mapelLedger.length} Mapel)
+              </span>
+            ` : `
+              <span class="badge" style="background: rgba(107,114,128,0.1); color: var(--text-muted); font-size: 0.75rem; padding: 3px 8px; border-radius: 6px;">
+                <i class="fas fa-magic"></i> Mapel Otomatis (${mapelList.length} Mapel)
+              </span>
+            `}
+          </div>
           <p style="margin: 4px 0 0; font-size: 0.8rem; color: var(--text-muted);">
-            Rekapitulasi perolehan nilai siswa di seluruh mata pelajaran beserta peringkat kelas.
+            Rekapitulasi perolehan nilai siswa di seluruh mata pelajaran beserta peringkat kelas. Klik <strong>"Atur Mapel Kelas"</strong> untuk menyesuaikan mapel jurusan (MIPA, IPS, Bahasa).
           </p>
         </div>
         <div style="min-width: 220px; max-width: 320px; width: 100%;">
@@ -14041,7 +15225,7 @@ function exportLedgerNilaiCSV() {
   const classId = getWaliKelasClassId();
   const kelas = db.kelas.find(k => k.id === classId) || { nama: "Kelas" };
   const students = getStudentsForClass(classId);
-  const mapelList = db.mapel || ["Matematika", "Fisika", "Kimia", "Biologi", "Bahasa Indonesia", "Bahasa Inggris"];
+  const mapelList = getWaliKelasMapelList(classId);
 
   const ledgerData = students.map(s => {
     let totalScore = 0;
@@ -14076,7 +15260,293 @@ function exportLedgerNilaiCSV() {
   downloadCSV(csv, `ledger_nilai_${kelas.nama}.csv`);
 }
 
+// ============================================================================
+// MODAL ATUR MATA PELAJARAN LEDGER KELAS (MIPA, IPS, BAHASA, UMUM, KUSTOM)
+// ============================================================================
+
+function openModalAturMapelLedger(classId) {
+  const kelas = (db.kelas || []).find(k => String(k.id) === String(classId)) || { id: classId, nama: "Kelas Binaan" };
+  const currentSelected = new Set(getWaliKelasMapelList(classId));
+  const isCustomized = Boolean(kelas.mapelLedger && Array.isArray(kelas.mapelLedger) && kelas.mapelLedger.length > 0);
+
+  // Kumpulkan mapel yang sudah memiliki nilai di kelas binaan ini
+  const students = getStudentsForClass(classId);
+  const studentIds = new Set(students.map(s => s.id));
+  const activeWithGrades = new Set();
+  (db.nilai || []).forEach(n => {
+    if (n && n.mapel && n.mapel.trim() && studentIds.has(n.siswaId)) {
+      activeWithGrades.add(n.mapel.trim());
+    }
+  });
+
+  // Himpun seluruh mata pelajaran yang tersedia
+  const allMapelSet = new Set();
+  Object.values(PRESET_MAPEL_JURUSAN).forEach(list => list.forEach(m => allMapelSet.add(m.trim())));
+  (db.mapel || []).forEach(m => { if (m && m.trim()) allMapelSet.add(m.trim()); });
+  DEFAULT_SCHOOL_MAPEL.forEach(m => allMapelSet.add(m.trim()));
+  activeWithGrades.forEach(m => allMapelSet.add(m));
+  currentSelected.forEach(m => allMapelSet.add(m));
+
+  const allMapelsArray = Array.from(allMapelSet);
+
+  const getMapelCategory = (name) => {
+    if (["Fisika", "Kimia", "Biologi", "Matematika Tingkat Lanjut"].includes(name)) return { label: "MIPA", color: "#2563eb", bg: "rgba(37,99,235,0.1)" };
+    if (["Ekonomi", "Sosiologi", "Geografi", "Antropologi"].includes(name)) return { label: "IPS", color: "#d97706", bg: "rgba(217,119,6,0.1)" };
+    if (["Bahasa & Sastra Indonesia", "Bahasa & Sastra Inggris", "Bahasa Asing", "Bahasa Jepang", "Bahasa Jerman", "Bahasa Arab", "Bahasa Mandarin", "Bahasa Korea"].includes(name)) return { label: "Bahasa", color: "#8b5cf6", bg: "rgba(139,92,246,0.1)" };
+    if (["Matematika", "Bahasa Indonesia", "Bahasa Inggris", "Pendidikan Agama", "PPKn", "Sejarah", "PJOK", "Seni Budaya", "Prakarya", "Informatika"].includes(name)) return { label: "Umum", color: "#059669", bg: "rgba(5,150,105,0.1)" };
+    return { label: "Lainnya", color: "#6b7280", bg: "rgba(107,114,128,0.1)" };
+  };
+
+  // Urutkan: Mapel terpilih dan bernilai di atas
+  allMapelsArray.sort((a, b) => {
+    const aSel = currentSelected.has(a);
+    const bSel = currentSelected.has(b);
+    if (aSel && !bSel) return -1;
+    if (!aSel && bSel) return 1;
+    return a.localeCompare(b);
+  });
+
+  const checkboxesHtml = allMapelsArray.map(m => {
+    const isChecked = currentSelected.has(m);
+    const hasGrade = activeWithGrades.has(m);
+    const cat = getMapelCategory(m);
+
+    return `
+      <label class="mapel-checkbox-card" style="display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 8px; border: 1px solid var(--border-color); background: var(--bg-card); cursor: pointer; transition: all 0.15s ease; user-select: none;">
+        <input type="checkbox" class="cb-mapel-ledger" value="${escapeHtml(m)}" ${isChecked ? 'checked' : ''} onchange="updateCountMapelLedgerModal()" style="width: 17px; height: 17px; cursor: pointer; accent-color: var(--primary);">
+        <span style="font-size: 0.88rem; font-weight: 600; flex: 1; color: var(--text-main);">${escapeHtml(m)}</span>
+        <div style="display: flex; align-items: center; gap: 4px;">
+          ${hasGrade ? `<span title="Ada data nilai siswa pada mapel ini" style="font-size: 0.7rem; font-weight: 700; color: #059669; background: rgba(16,185,129,0.12); padding: 2px 6px; border-radius: 4px;"><i class="fas fa-check"></i> Ada Nilai</span>` : ''}
+          <span style="font-size: 0.7rem; font-weight: 700; color: ${cat.color}; background: ${cat.bg}; padding: 2px 6px; border-radius: 4px;">${cat.label}</span>
+        </div>
+      </label>
+    `;
+  }).join("");
+
+  const bodyHtml = `
+    <div style="margin-bottom: 14px;">
+      <p style="font-size: 0.88rem; color: var(--text-muted); margin: 0 0 12px 0;">
+        Sesuaikan mata pelajaran yang diajarkan pada kelas <strong>${escapeHtml(kelas.nama)}</strong>. Hanya mata pelajaran yang dicentang yang akan tampil pada kolom Ledger Nilai, format Cetak, dan Ekspor Excel.
+      </p>
+
+      <!-- Preset Cepat Jurusan -->
+      <div style="background: var(--bg-app); border: 1px solid var(--border-color); border-radius: 8px; padding: 12px; margin-bottom: 14px;">
+        <div style="font-size: 0.76rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase; margin-bottom: 8px; letter-spacing: 0.5px;">
+          <i class="fas fa-magic"></i> Preset Cepat Jurusan (1-Klik):
+        </div>
+        <div style="display: flex; flex-wrap: wrap; gap: 6px;">
+          <button type="button" class="btn btn-sm btn-secondary" onclick="applyPresetMapelLedgerModal('ips')" style="font-size: 0.82rem; font-weight: 600; padding: 5px 12px;">
+            <i class="fas fa-chart-line" style="color: #d97706;"></i> Rumpun IPS
+          </button>
+          <button type="button" class="btn btn-sm btn-secondary" onclick="applyPresetMapelLedgerModal('mipa')" style="font-size: 0.82rem; font-weight: 600; padding: 5px 12px;">
+            <i class="fas fa-flask" style="color: #2563eb;"></i> Rumpun MIPA
+          </button>
+          <button type="button" class="btn btn-sm btn-secondary" onclick="applyPresetMapelLedgerModal('bahasa')" style="font-size: 0.82rem; font-weight: 600; padding: 5px 12px;">
+            <i class="fas fa-language" style="color: #8b5cf6;"></i> Rumpun Bahasa
+          </button>
+          <button type="button" class="btn btn-sm btn-secondary" onclick="applyPresetMapelLedgerModal('umum')" style="font-size: 0.82rem; font-weight: 600; padding: 5px 12px;">
+            <i class="fas fa-landmark" style="color: #059669;"></i> Mapel Umum
+          </button>
+          <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleAllMapelLedgerModal(true)" style="font-size: 0.82rem; padding: 5px 10px;" title="Centang Semua">
+            <i class="fas fa-check-double"></i> Pilih Semua
+          </button>
+          <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleAllMapelLedgerModal(false)" style="font-size: 0.82rem; padding: 5px 10px;" title="Kosongkan Pilihan">
+            <i class="fas fa-times"></i> Kosongkan
+          </button>
+        </div>
+      </div>
+
+      <!-- Header Counter -->
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; font-size: 0.85rem;">
+        <span style="font-weight: 600; color: var(--text-main);">Daftar Mata Pelajaran:</span>
+        <span id="counter-mapel-modal" class="badge" style="background: rgba(37,99,235,0.1); color: var(--primary); font-size: 0.82rem; font-weight: 700; padding: 4px 8px; border-radius: 6px;">
+          ${currentSelected.size} Mapel Terpilih
+        </span>
+      </div>
+
+      <!-- Grid Daftar Mapel -->
+      <div id="grid-mapel-ledger-modal" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px; max-height: 330px; overflow-y: auto; padding: 4px; border: 1px solid var(--border-color); border-radius: 8px; background: var(--bg-app);">
+        ${checkboxesHtml}
+      </div>
+
+      <!-- Tambah Mapel Manual Baru -->
+      <div style="margin-top: 14px; padding-top: 12px; border-top: 1px dashed var(--border-color);">
+        <label style="font-size: 0.8rem; font-weight: 700; color: var(--text-muted); display: block; margin-bottom: 6px;">
+          <i class="fas fa-plus-circle"></i> Tambah Mata Pelajaran Baru / Muatan Lokal:
+        </label>
+        <div style="display: flex; gap: 8px;">
+          <input type="text" id="input-new-mapel-ledger" class="form-control" placeholder="Ketik nama mapel (misal: Bahasa Sunda, Antropologi, dll)..." style="font-size: 0.88rem;" onkeydown="if(event.key==='Enter'){event.preventDefault(); addNewMapelToLedgerModal();}">
+          <button type="button" class="btn btn-secondary" onclick="addNewMapelToLedgerModal()" style="white-space: nowrap; font-size: 0.85rem; font-weight: 600;">
+            <i class="fas fa-plus"></i> Tambahkan
+          </button>
+        </div>
+      </div>
+    </div>
+  `;
+
+  const footerHtml = `
+    <div style="display: flex; justify-content: space-between; align-items: center; width: 100%; flex-wrap: wrap; gap: 8px;">
+      <div>
+        ${isCustomized ? `
+          <button type="button" class="btn btn-outline-danger" onclick="resetMapelLedgerToDefault('${classId}')" style="font-size: 0.85rem;">
+            <i class="fas fa-rotate-left"></i> Reset ke Otomatis
+          </button>
+        ` : `
+          <span style="font-size: 0.78rem; color: var(--text-muted);"><i class="fas fa-info-circle"></i> Saat ini menggunakan deteksi otomatis</span>
+        `}
+      </div>
+      <div style="display: flex; gap: 8px;">
+        <button type="button" class="btn btn-secondary" onclick="closeModal()">Batal</button>
+        <button type="button" class="btn btn-primary" onclick="saveMapelLedgerKelas('${classId}')">
+          <i class="fas fa-save"></i> Simpan Pilihan
+        </button>
+      </div>
+    </div>
+  `;
+
+  openModal(`Atur Mata Pelajaran Leger: Kelas ${kelas.nama}`, bodyHtml, footerHtml, true);
+  setTimeout(updateCountMapelLedgerModal, 50);
+}
+
+function updateCountMapelLedgerModal() {
+  const checked = document.querySelectorAll(".cb-mapel-ledger:checked");
+  const counter = document.getElementById("counter-mapel-modal");
+  if (counter) {
+    counter.textContent = `${checked.length} Mapel Terpilih`;
+  }
+}
+
+function toggleAllMapelLedgerModal(shouldCheck) {
+  const checkboxes = document.querySelectorAll(".cb-mapel-ledger");
+  checkboxes.forEach(cb => { cb.checked = Boolean(shouldCheck); });
+  updateCountMapelLedgerModal();
+}
+
+function applyPresetMapelLedgerModal(presetKey) {
+  const presetList = PRESET_MAPEL_JURUSAN[presetKey] || [];
+  const presetSet = new Set(presetList.map(s => s.toLowerCase().trim()));
+  const checkboxes = document.querySelectorAll(".cb-mapel-ledger");
+  
+  checkboxes.forEach(cb => {
+    const val = cb.value.toLowerCase().trim();
+    cb.checked = presetSet.has(val);
+  });
+
+  const grid = document.getElementById("grid-mapel-ledger-modal");
+  if (grid) {
+    const existingValues = new Set(Array.from(checkboxes).map(c => c.value.toLowerCase().trim()));
+    presetList.forEach(m => {
+      if (!existingValues.has(m.toLowerCase().trim())) {
+        const newLabel = document.createElement("label");
+        newLabel.className = "mapel-checkbox-card";
+        newLabel.style = "display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 8px; border: 1px solid var(--border-color); background: var(--bg-card); cursor: pointer; transition: all 0.15s ease; user-select: none;";
+        newLabel.innerHTML = `
+          <input type="checkbox" class="cb-mapel-ledger" value="${escapeHtml(m)}" checked onchange="updateCountMapelLedgerModal()" style="width: 17px; height: 17px; cursor: pointer; accent-color: var(--primary);">
+          <span style="font-size: 0.88rem; font-weight: 600; flex: 1; color: var(--text-main);">${escapeHtml(m)}</span>
+          <span style="font-size: 0.7rem; font-weight: 700; color: #d97706; background: rgba(217,119,6,0.1); padding: 2px 6px; border-radius: 4px;">Preset</span>
+        `;
+        grid.prepend(newLabel);
+      }
+    });
+  }
+
+  updateCountMapelLedgerModal();
+  showToast(`Preset rumpun ${presetKey.toUpperCase()} diterapkan.`);
+}
+
+function addNewMapelToLedgerModal() {
+  const input = document.getElementById("input-new-mapel-ledger");
+  if (!input) return;
+  const val = input.value.trim();
+  if (!val) {
+    showToast("Silakan ketik nama mata pelajaran terlebih dahulu.", "warning");
+    return;
+  }
+
+  const existing = Array.from(document.querySelectorAll(".cb-mapel-ledger")).find(c => c.value.toLowerCase().trim() === val.toLowerCase());
+  if (existing) {
+    existing.checked = true;
+    existing.scrollIntoView({ behavior: "smooth", block: "center" });
+    input.value = "";
+    updateCountMapelLedgerModal();
+    showToast(`Mata pelajaran "${val}" sudah ada dan telah dicentang.`);
+    return;
+  }
+
+  const grid = document.getElementById("grid-mapel-ledger-modal");
+  if (grid) {
+    const newLabel = document.createElement("label");
+    newLabel.className = "mapel-checkbox-card";
+    newLabel.style = "display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 8px; border: 1px solid var(--border-color); background: var(--bg-card); cursor: pointer; transition: all 0.15s ease; user-select: none;";
+    newLabel.innerHTML = `
+      <input type="checkbox" class="cb-mapel-ledger" value="${escapeHtml(val)}" checked onchange="updateCountMapelLedgerModal()" style="width: 17px; height: 17px; cursor: pointer; accent-color: var(--primary);">
+      <span style="font-size: 0.88rem; font-weight: 600; flex: 1; color: var(--text-main);">${escapeHtml(val)}</span>
+      <span style="font-size: 0.7rem; font-weight: 700; color: #2563eb; background: rgba(37,99,235,0.1); padding: 2px 6px; border-radius: 4px;">Baru</span>
+    `;
+    grid.prepend(newLabel);
+    newLabel.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+
+  input.value = "";
+  updateCountMapelLedgerModal();
+  showToast(`Mata pelajaran "${val}" berhasil ditambahkan.`);
+}
+
+async function saveMapelLedgerKelas(classId) {
+  const checkedNodes = document.querySelectorAll(".cb-mapel-ledger:checked");
+  const selected = Array.from(checkedNodes).map(cb => cb.value.trim()).filter(Boolean);
+
+  if (selected.length === 0) {
+    showToast("Pilih minimal 1 mata pelajaran untuk ditampilkan di Ledger Nilai.", "warning");
+    return;
+  }
+
+  const kelas = (db.kelas || []).find(k => String(k.id) === String(classId));
+  if (kelas) {
+    kelas.mapelLedger = selected;
+  }
+  db.mapelLedger = db.mapelLedger || {};
+  db.mapelLedger[classId] = selected;
+
+  // Pastikan mapel baru juga tersimpan di master db.mapel
+  db.mapel = db.mapel || [];
+  selected.forEach(m => {
+    if (!db.mapel.includes(m)) db.mapel.push(m);
+  });
+
+  await saveDatabase(true);
+  closeModal();
+
+  const container = document.getElementById("main-content");
+  if (container) {
+    renderLedgerNilaiWaliKelas(container);
+  }
+  showToast(`Mata pelajaran kelas ${kelas ? kelas.nama : ''} (${selected.length} mapel) berhasil disimpan!`);
+}
+
+async function resetMapelLedgerToDefault(classId) {
+  const kelas = (db.kelas || []).find(k => String(k.id) === String(classId));
+  if (kelas) {
+    delete kelas.mapelLedger;
+  }
+  if (db.mapelLedger && db.mapelLedger[classId]) {
+    delete db.mapelLedger[classId];
+  }
+
+  await saveDatabase(true);
+  closeModal();
+
+  const container = document.getElementById("main-content");
+  if (container) {
+    renderLedgerNilaiWaliKelas(container);
+  }
+  showToast(`Mata pelajaran kelas ${kelas ? kelas.nama : ''} dikembalikan ke mode otomatis.`);
+}
+
 function renderCatatanWaliKelas(container) {
+  if (!container) container = document.getElementById("content-container") || document.getElementById("content-area");
+  if (!container) return;
+
   const session = getSession();
   const isAdmin = session && session.role === "admin";
   const classId = getWaliKelasClassId();
@@ -14084,8 +15554,8 @@ function renderCatatanWaliKelas(container) {
   const students = getStudentsForClass(classId);
   const studentIds = students.map(s => s.id);
 
-  // Ambil catatan pembinaan untuk siswa di kelas ini
-  const catatanList = (db.catatanWali || []).filter(c => studentIds.includes(c.siswaId));
+  // Ambil catatan pembinaan untuk siswa di kelas ini (berdasarkan siswa terdaftar maupun kelasId)
+  const catatanList = (db.catatanWali || []).filter(c => studentIds.includes(c.siswaId) || (c.kelasId && String(c.kelasId) === String(classId)));
   catatanList.sort((a, b) => new Date(b.tanggal || b.createdAt) - new Date(a.tanggal || a.createdAt));
 
   const kelasOptions = db.kelas.map(k => `
@@ -14109,9 +15579,15 @@ function renderCatatanWaliKelas(container) {
             `}
           </div>
         </div>
-        <div>
+        <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+          <button type="button" class="btn btn-secondary" onclick="printLaporanBukuKasusWaliKelas()" title="Cetak Laporan Resmi Buku Kasus">
+            <i class="fas fa-print"></i> Cetak Laporan
+          </button>
+          <button type="button" class="btn btn-outline-primary" onclick="exportBukuKasusCSV()" title="Ekspor data ke file Excel / CSV">
+            <i class="fas fa-file-excel"></i> Ekspor CSV
+          </button>
           <button type="button" class="btn btn-primary" onclick="openCatatanWaliModal()">
-            <i class="fas fa-plus"></i> Tambah Catatan Kasus / Pembinaan
+            <i class="fas fa-plus"></i> Tambah Catatan Kasus
           </button>
         </div>
       </div>
@@ -14120,7 +15596,7 @@ function renderCatatanWaliKelas(container) {
     <div class="card">
       <div class="card-header" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
         <div>
-          <h3 style="margin: 0; font-size: 1.1rem;"><i class="fas fa-book-bookmark"></i> Buku Kasus & Catatan Pembinaan: ${kelas.nama}</h3>
+          <h3 style="margin: 0; font-size: 1.1rem;"><i class="fas fa-book-bookmark"></i> Buku Kasus & Catatan Pembinaan: Kelas ${escapeHtml(kelas.nama)}</h3>
           <p style="margin: 4px 0 0; font-size: 0.8rem; color: var(--text-muted);">
             Catatan kedisiplinan, tindak lanjut pelanggaran/masalah siswa, dan komunikasi dengan orang tua murid.
           </p>
@@ -14142,13 +15618,13 @@ function renderCatatanWaliKelas(container) {
             <i class="fas fa-clipboard-check" style="font-size: 2.2rem; color: var(--text-muted); margin-bottom: 10px; display: block;"></i>
             <h4 style="margin: 0 0 6px;">Belum Ada Catatan Kasus</h4>
             <p style="margin: 0; font-size: 0.85rem; color: var(--text-muted);">
-              Klik tombol <strong>"Tambah Catatan Kasus / Pembinaan"</strong> untuk mencatat kasus kedisiplinan atau pendampingan siswa di kelas ini.
+              Klik tombol <strong>"Tambah Catatan Kasus"</strong> untuk mendokumentasikan kedisiplinan atau pendampingan siswa di kelas ini.
             </p>
           </div>
         ` : `
           <div id="catatan-wali-list-container" style="display: flex; flex-direction: column; gap: 12px;">
             ${catatanList.map(item => {
-              const student = db.siswa.find(s => s.id === item.siswaId) || { nama: "Siswa Tidak Ditemukan", nisn: "-" };
+              const student = db.siswa.find(s => s.id === item.siswaId) || { nama: item.siswaNama || "Siswa", nisn: "-" };
               const contact = getStudentParentContact(student);
 
               return `
@@ -14156,9 +15632,9 @@ function renderCatatanWaliKelas(container) {
                   <div style="display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 10px; margin-bottom: 8px;">
                     <div>
                       <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-                        <span style="font-weight: 700; font-size: 1rem; color: var(--text-main);">${student.nama}</span>
-                        <span class="badge" style="background: rgba(37,99,235,0.1); color: #2563eb;">${item.kategori}</span>
-                        <span class="badge ${item.status === 'Selesai' ? 'badge-hadir' : 'badge-alpa'}">${item.status}</span>
+                        <span style="font-weight: 700; font-size: 1rem; color: var(--text-main);">${escapeHtml(student.nama)}</span>
+                        <span class="badge" style="background: rgba(37,99,235,0.1); color: #2563eb;">${escapeHtml(item.kategori || 'Umum')}</span>
+                        <span class="badge ${item.status === 'Selesai' ? 'badge-hadir' : 'badge-alpa'}">${escapeHtml(item.status || 'Dalam Proses')}</span>
                       </div>
                       <div style="font-size: 0.76rem; color: var(--text-muted); margin-top: 3px;">
                         <i class="fas fa-calendar-alt"></i> Tanggal: ${formatDateIndoFull(item.tanggal)} • NISN: ${student.nisn || '-'}
@@ -14179,12 +15655,12 @@ function renderCatatanWaliKelas(container) {
 
                   <div style="font-size: 0.88rem; margin-bottom: 8px; line-height: 1.5; color: var(--text-main);">
                     <strong>Uraian Kejadian / Kasus:</strong><br>
-                    ${item.kasus.replace(/\n/g, '<br>')}
+                    ${escapeHtml(item.kasus || '-').replace(/\n/g, '<br>')}
                   </div>
 
                   <div style="font-size: 0.85rem; padding: 10px 12px; background: var(--bg-app); border-radius: 8px; border: 1px dashed var(--border-color); color: var(--text-main);">
                     <strong>Tindak Lanjut / Solusi Wali Kelas:</strong><br>
-                    ${item.tindakLanjut ? item.tindakLanjut.replace(/\n/g, '<br>') : '<span style="color:var(--text-muted); font-style:italic;">Belum ada catatan tindak lanjut</span>'}
+                    ${item.tindakLanjut ? escapeHtml(item.tindakLanjut).replace(/\n/g, '<br>') : '<span style="color:var(--text-muted); font-style:italic;">Belum ada catatan tindak lanjut</span>'}
                   </div>
                 </div>
               `;
@@ -14215,10 +15691,6 @@ function openCatatanWaliModal(catatanId = null, defaultSiswaId = null) {
   const tindakLanjut = existing ? existing.tindakLanjut : "";
   const status = existing ? existing.status : "Dalam Proses";
 
-  const siswaOptions = students.map(s => `
-    <option value="${s.id}" ${s.id === activeSiswaId ? 'selected' : ''}>${s.nama} (${s.nisn || 'No NISN'})</option>
-  `).join("");
-
   const kategoriList = [
     "Kedisiplinan & Tata Tertib",
     "Masalah Akademik & Belajar",
@@ -14230,12 +15702,15 @@ function openCatatanWaliModal(catatanId = null, defaultSiswaId = null) {
 
   const modalHtml = `
     <form id="form-catatan-wali" onsubmit="handleSaveCatatanWali(event, '${catatanId || ''}')">
-      <div class="form-group" style="margin-bottom: 12px;">
-        <label style="font-weight: 600; font-size: 0.85rem; display: block; margin-bottom: 4px;">Pilih Siswa:</label>
-        <select id="modal-cw-siswa" class="form-control" required>
-          ${siswaOptions}
-        </select>
-      </div>
+      ${renderStudentComboboxHtml({
+        id: "modal-cw-siswa",
+        students: students,
+        selectedId: activeSiswaId,
+        manualName: existing ? (existing.siswaNama || "") : "",
+        placeholder: "Ketik nama siswa / NISN, atau klik ▾ untuk daftar dropdown...",
+        required: true,
+        label: "Pilih Siswa: *"
+      })}
 
       <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px;">
         <div>
@@ -14278,24 +15753,51 @@ function openCatatanWaliModal(catatanId = null, defaultSiswaId = null) {
   `;
 
   openModal(existing ? "Edit Catatan Kasus Siswa" : "Tambah Catatan Kasus & Pembinaan", modalHtml, footerHtml, false);
+  initStudentCombobox("modal-cw-siswa", students);
 }
 
 function handleSaveCatatanWali(event, catatanId) {
   if (event) event.preventDefault();
 
-  const siswaId = document.getElementById("modal-cw-siswa")?.value;
+  const siswaIdEl = document.getElementById("modal-cw-siswa");
+  const siswaNamaEl = document.getElementById("modal-cw-siswa-nama");
+  const siswaInputEl = document.getElementById("modal-cw-siswa-input");
+
+  let siswaId = siswaIdEl ? siswaIdEl.value.trim() : "";
+  let siswaNama = siswaNamaEl ? siswaNamaEl.value.trim() : "";
+  const typedText = siswaInputEl ? siswaInputEl.value.trim() : "";
+
+  if (!siswaId && typedText) {
+    const reg = window._studentComboboxRegistry["modal-cw-siswa"];
+    const currentStudents = reg ? reg.students : (db.siswa || []);
+    const match = currentStudents.find(s => {
+      const k = (db.kelas || []).find(cl => cl.id === s.kelasId) || { nama: "" };
+      return s.nama.toLowerCase() === typedText.toLowerCase() ||
+             `${s.nama} (${k.nama})`.toLowerCase() === typedText.toLowerCase() ||
+             (s.nisn && s.nisn === typedText);
+    });
+    if (match) {
+      siswaId = match.id;
+      siswaNama = match.nama;
+    } else {
+      siswaId = "manual_" + Date.now();
+      siswaNama = typedText;
+    }
+  }
+
   const tanggal = document.getElementById("modal-cw-tanggal")?.value;
   const status = document.getElementById("modal-cw-status")?.value;
   const kategori = document.getElementById("modal-cw-kategori")?.value;
   const kasus = document.getElementById("modal-cw-kasus")?.value?.trim();
   const tindakLanjut = document.getElementById("modal-cw-tindak-lanjut")?.value?.trim();
 
-  if (!siswaId || !kasus) {
-    alert("Harap pilih siswa dan isi uraian kejadian.");
+  if ((!siswaId && !siswaNama && !typedText) || !kasus) {
+    alert("Harap pilih atau ketik nama siswa dan isi uraian kejadian.");
     return;
   }
 
   const student = db.siswa.find(s => s.id === siswaId);
+  const resolvedNama = siswaNama || (student ? student.nama : typedText);
   const kelasId = student ? student.kelasId : getWaliKelasClassId();
 
   db.catatanWali = db.catatanWali || [];
@@ -14306,6 +15808,7 @@ function handleSaveCatatanWali(event, catatanId) {
       db.catatanWali[idx] = {
         ...db.catatanWali[idx],
         siswaId,
+        siswaNama: resolvedNama,
         kelasId,
         tanggal,
         status,
@@ -14319,6 +15822,7 @@ function handleSaveCatatanWali(event, catatanId) {
     db.catatanWali.push({
       id: "cw-" + Date.now() + Math.random().toString(36).substr(2, 4),
       siswaId,
+      siswaNama: resolvedNama,
       kelasId,
       tanggal,
       status,
@@ -14344,7 +15848,165 @@ function deleteCatatanWali(id) {
   db.catatanWali = (db.catatanWali || []).filter(c => c.id !== id);
   saveDatabase(true);
   showToast("Catatan berhasil dihapus.");
-  renderCatatanWaliKelas(document.getElementById("content-area"));
+  renderCatatanWaliKelas(document.getElementById("content-container") || document.getElementById("content-area"));
+}
+
+function printLaporanBukuKasusWaliKelas() {
+  const classId = getWaliKelasClassId();
+  const kelas = db.kelas.find(k => k.id === classId) || { nama: "Kelas Binaan" };
+  const students = getStudentsForClass(classId);
+  const studentIds = students.map(s => s.id);
+  const catatanList = (db.catatanWali || []).filter(c => studentIds.includes(c.siswaId) || (c.kelasId && String(c.kelasId) === String(classId)));
+  catatanList.sort((a, b) => new Date(b.tanggal || b.createdAt) - new Date(a.tanggal || a.createdAt));
+
+  const teacherName = (db.guruProfile && db.guruProfile.nama) ? db.guruProfile.nama : "Wali Kelas";
+  const teacherNip = (db.guruProfile && db.guruProfile.nip) ? `NIP. ${db.guruProfile.nip}` : "-";
+  const kepalaSekolah = (db.guruProfile && db.guruProfile.kepalaSekolah) ? db.guruProfile.kepalaSekolah : "Kepala Sekolah, M.Pd.";
+  const kepalaNip = (db.guruProfile && db.guruProfile.kepalaSekolahNip) ? `NIP. ${db.guruProfile.kepalaSekolahNip}` : "-";
+  const userSchool = getCurrentSchoolName();
+  const schoolAddress = (db.guruProfile && db.guruProfile.alamat) ? db.guruProfile.alamat : "Sulawesi Tenggara";
+
+  const win = window.open("", "_blank");
+  if (!win) {
+    alert("Jendela pop-up diblokir peramban Anda. Harap izinkan pop-up untuk mencetak laporan.");
+    return;
+  }
+
+  win.document.write(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Buku Catatan Kasus & Pembinaan Siswa - Kelas ${escapeHtml(kelas.nama)}</title>
+      <style>
+        body { font-family: 'Times New Roman', Times, serif; margin: 15mm 15mm; color: #000; line-height: 1.4; font-size: 11pt; }
+        .kop { text-align: center; border-bottom: 3px double #000; padding-bottom: 8px; margin-bottom: 14px; }
+        .kop h2 { margin: 0; font-size: 13pt; text-transform: uppercase; font-weight: bold; }
+        .kop h3 { margin: 2px 0; font-size: 15pt; text-transform: uppercase; font-weight: bold; }
+        .kop p { margin: 0; font-size: 9.5pt; font-style: italic; }
+        h4 { text-align: center; margin: 12px 0 4px; font-size: 13pt; text-transform: uppercase; font-weight: bold; }
+        .subtitle { text-align: center; margin: 0 0 14px; font-size: 10.5pt; }
+        table.meta { width: 100%; margin-bottom: 10px; font-size: 10.5pt; border-collapse: collapse; }
+        table.meta td { padding: 3px 0; border: none; }
+        table.data { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 9.5pt; }
+        table.data th, table.data td { border: 1px solid #000; padding: 6px 8px; vertical-align: top; }
+        table.data th { background: #f0f0f0; text-align: center; font-weight: bold; }
+        .ttd-box { margin-top: 32px; display: flex; justify-content: space-between; text-align: center; font-size: 11pt; page-break-inside: avoid; }
+        .ttd-col { width: 45%; }
+        .ttd-space { height: 65px; }
+        @media print {
+          @page { size: A4 landscape; margin: 12mm; }
+        }
+      </style>
+    </head>
+    <body>
+      <div class="kop">
+        <h2>PEMERINTAH DAERAH PROVINSI SULAWESI TENGGARA</h2>
+        <h2>DINAS PENDIDIKAN DAN KEBUDAYAAN</h2>
+        <h3>${escapeHtml(userSchool)}</h3>
+        <p>${escapeHtml(schoolAddress)}</p>
+      </div>
+
+      <h4>BUKU CATATAN KASUS & PEMBINAAN SISWA</h4>
+      <div class="subtitle">Rekapitulasi Pelanggaran Kedisiplinan, Karakter, dan Tindak Lanjut Wali Kelas</div>
+
+      <table class="meta">
+        <tr>
+          <td style="width: 15%;"><strong>Kelas Binaan</strong></td>
+          <td style="width: 35%;">: ${escapeHtml(kelas.nama)}</td>
+          <td style="width: 18%;"><strong>Wali Kelas</strong></td>
+          <td style="width: 32%;">: ${escapeHtml(teacherName)}</td>
+        </tr>
+        <tr>
+          <td><strong>Total Kasus</strong></td>
+          <td>: ${catatanList.length} Catatan</td>
+          <td><strong>Tanggal Cetak</strong></td>
+          <td>: ${formatDateIndoFull(getLocalDateString())}</td>
+        </tr>
+      </table>
+
+      <table class="data">
+        <thead>
+          <tr>
+            <th style="width: 30px;">No</th>
+            <th style="width: 80px;">Tanggal</th>
+            <th style="width: 90px;">NISN</th>
+            <th style="width: 140px;">Nama Siswa</th>
+            <th style="width: 120px;">Kategori Masalah</th>
+            <th>Uraian Kejadian / Permasalahan</th>
+            <th>Tindak Lanjut / Solusi Wali Kelas</th>
+            <th style="width: 85px;">Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${catatanList.length === 0 ? `
+            <tr><td colspan="8" style="text-align: center; padding: 25px;">Belum ada catatan kasus / pembinaan untuk kelas ini.</td></tr>
+          ` : catatanList.map((item, idx) => {
+            const student = db.siswa.find(s => s.id === item.siswaId) || { nama: item.siswaNama || "Siswa", nisn: "-" };
+            return `
+              <tr>
+                <td style="text-align: center;">${idx + 1}</td>
+                <td style="text-align: center;">${item.tanggal || '-'}</td>
+                <td style="text-align: center;"><code>${student.nisn || '-'}</code></td>
+                <td><strong>${escapeHtml(student.nama)}</strong></td>
+                <td>${escapeHtml(item.kategori || '-')}</td>
+                <td>${escapeHtml(item.kasus || '-').replace(/\n/g, '<br>')}</td>
+                <td>${escapeHtml(item.tindakLanjut || '-').replace(/\n/g, '<br>')}</td>
+                <td style="text-align: center; font-weight: bold; color: ${item.status === 'Selesai' ? '#059669' : '#d97706'};">
+                  ${escapeHtml(item.status || 'Dalam Proses')}
+                </td>
+              </tr>
+            `;
+          }).join("")}
+        </tbody>
+      </table>
+
+      <div class="ttd-box">
+        <div class="ttd-col">
+          <div>Mengetahui,</div>
+          <div>Kepala Sekolah</div>
+          <div class="ttd-space"></div>
+          <div style="font-weight: bold; text-decoration: underline;">${escapeHtml(kepalaSekolah)}</div>
+          <div>${escapeHtml(kepalaNip)}</div>
+        </div>
+        <div class="ttd-col">
+          <div>Lasolo, ${formatDateIndo(getLocalDateString())}</div>
+          <div>Wali Kelas ${escapeHtml(kelas.nama)}</div>
+          <div class="ttd-space"></div>
+          <div style="font-weight: bold; text-decoration: underline;">${escapeHtml(teacherName)}</div>
+          <div>${escapeHtml(teacherNip)}</div>
+        </div>
+      </div>
+
+      <script>
+        window.onload = function() {
+          window.print();
+        }
+      </script>
+    </body>
+    </html>
+  `);
+  win.document.close();
+}
+
+function exportBukuKasusCSV() {
+  const classId = getWaliKelasClassId();
+  const kelas = db.kelas.find(k => k.id === classId) || { nama: "Kelas" };
+  const students = getStudentsForClass(classId);
+  const studentIds = students.map(s => s.id);
+  const catatanList = (db.catatanWali || []).filter(c => studentIds.includes(c.siswaId) || (c.kelasId && String(c.kelasId) === String(classId)));
+  catatanList.sort((a, b) => new Date(b.tanggal || b.createdAt) - new Date(a.tanggal || a.createdAt));
+
+  let csv = `BUKU CATATAN KASUS SISWA KELAS ${kelas.nama}\r\n\r\n`;
+  csv += "No;Tanggal;NISN;Nama Siswa;Kelas;Kategori;Uraian Permasalahan;Tindak Lanjut;Status\r\n";
+
+  catatanList.forEach((item, idx) => {
+    const student = db.siswa.find(s => s.id === item.siswaId) || { nama: item.siswaNama || "Siswa", nisn: "-" };
+    const kasusClean = (item.kasus || "").replace(/[\r\n]+/g, " ");
+    const tlClean = (item.tindakLanjut || "").replace(/[\r\n]+/g, " ");
+    csv += `${idx + 1};"${item.tanggal || ''}";"${student.nisn || ''}";"${student.nama}";"${kelas.nama}";"${item.kategori || ''}";"${kasusClean}";"${tlClean}";"${item.status || ''}"\r\n`;
+  });
+
+  downloadCSV(csv, `buku_kasus_${kelas.nama}.csv`);
 }
 
 function sendCatatanWaliToParentWA(id) {
@@ -14557,9 +16219,9 @@ function renderDashboardGuruWali(container) {
     </div>
   `;
 
-  // Render Tindak Lanjut & Laporan Penilaian Section otomatis
+  // Render Tindak Lanjut & Laporan Penilaian Section otomatis untuk HARI INI
   setTimeout(() => {
-    renderDashboardIntervention();
+    renderDashboardIntervention(todayStr);
     renderDashboardAcademicAlerts();
   }, 30);
 }
@@ -15242,6 +16904,9 @@ function renderSiswaAsuhanGuruWali(container) {
 
 
 function renderJurnalBimbinganGuruWali(container) {
+  if (!container) container = document.getElementById("content-container") || document.getElementById("content-area");
+  if (!container) return;
+
   db.jurnalBimbingan = db.jurnalBimbingan || [];
   const list = [...db.jurnalBimbingan].sort((a, b) => new Date(b.tanggal || b.createdAt) - new Date(a.tanggal || a.createdAt));
 
@@ -15254,7 +16919,13 @@ function renderJurnalBimbinganGuruWali(container) {
             Catatan pendampingan perkembangan moral, akademik, dan konseling pribadi siswa asuhan.
           </p>
         </div>
-        <div>
+        <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+          <button type="button" class="btn btn-secondary" onclick="printLaporanJurnalBimbinganGuruWali()" title="Cetak Laporan Bimbingan Siswa Asuhan">
+            <i class="fas fa-print"></i> Cetak Laporan Bimbingan
+          </button>
+          <button type="button" class="btn btn-outline-primary" onclick="exportJurnalBimbinganCSV()" title="Ekspor data ke file Excel / CSV">
+            <i class="fas fa-file-excel"></i> Ekspor CSV
+          </button>
           <button type="button" class="btn btn-primary" onclick="openJurnalBimbinganModal()">
             <i class="fas fa-plus"></i> Catat Bimbingan Baru
           </button>
@@ -15288,7 +16959,7 @@ function renderJurnalBimbinganGuruWali(container) {
         ` : `
           <div id="jurnal-bimbingan-list-container" style="display: flex; flex-direction: column; gap: 12px;">
             ${list.map(jb => {
-              const student = db.siswa.find(s => s.id === jb.siswaId) || { nama: "Siswa Tidak Ditemukan", nisn: "-" };
+              const student = db.siswa.find(s => s.id === jb.siswaId) || { nama: jb.siswaNama || "Siswa", nisn: "-" };
               const kelas = db.kelas.find(k => k.id === student.kelasId) || { nama: "-" };
 
               return `
@@ -15296,10 +16967,10 @@ function renderJurnalBimbinganGuruWali(container) {
                   <div style="display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 10px; margin-bottom: 8px;">
                     <div>
                       <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-                        <span style="font-weight: 700; font-size: 1rem; color: var(--text-main);">${student.nama}</span>
-                        <span class="badge" style="background: var(--bg-app); border: 1px solid var(--border-color);">Kelas ${kelas.nama}</span>
-                        <span class="badge" style="background: rgba(124,58,237,0.1); color: #7c3aed;">${jb.bidang}</span>
-                        <span class="badge ${jb.status === 'Tuntas' ? 'badge-hadir' : 'badge-alpa'}">${jb.status}</span>
+                        <span style="font-weight: 700; font-size: 1rem; color: var(--text-main);">${escapeHtml(student.nama)}</span>
+                        <span class="badge" style="background: var(--bg-app); border: 1px solid var(--border-color);">Kelas ${escapeHtml(kelas.nama)}</span>
+                        <span class="badge" style="background: rgba(124,58,237,0.1); color: #7c3aed;">${escapeHtml(jb.bidang || 'Umum')}</span>
+                        <span class="badge ${jb.status === 'Tuntas' ? 'badge-hadir' : 'badge-alpa'}">${escapeHtml(jb.status || 'Dalam Proses')}</span>
                       </div>
                       <div style="font-size: 0.76rem; color: var(--text-muted); margin-top: 3px;">
                         <i class="fas fa-calendar-alt"></i> Tanggal Bimbingan: ${formatDateIndoFull(jb.tanggal)}
@@ -15320,12 +16991,12 @@ function renderJurnalBimbinganGuruWali(container) {
 
                   <div style="font-size: 0.88rem; margin-bottom: 8px; line-height: 1.5; color: var(--text-main);">
                     <strong>Pokok Bahasan / Permasalahan:</strong><br>
-                    ${jb.pokokBahasan.replace(/\n/g, '<br>')}
+                    ${escapeHtml(jb.pokokBahasan || '-').replace(/\n/g, '<br>')}
                   </div>
 
                   <div style="font-size: 0.85rem; padding: 10px 12px; background: var(--bg-app); border-radius: 8px; border: 1px dashed var(--border-color); color: var(--text-main);">
                     <strong>Rencana Tindak Lanjut / Arahan Mentor:</strong><br>
-                    ${jb.tindakLanjut ? jb.tindakLanjut.replace(/\n/g, '<br>') : '<span style="color:var(--text-muted); font-style:italic;">Belum ada rencana tindak lanjut</span>'}
+                    ${jb.tindakLanjut ? escapeHtml(jb.tindakLanjut).replace(/\n/g, '<br>') : '<span style="color:var(--text-muted); font-style:italic;">Belum ada rencana tindak lanjut</span>'}
                   </div>
                 </div>
               `;
@@ -15373,12 +17044,15 @@ function openJurnalBimbinganModal(jurnalId = null, defaultSiswaId = null) {
 
   const modalHtml = `
     <form id="form-jurnal-bimbingan" onsubmit="handleSaveJurnalBimbingan(event, '${jurnalId || ''}')">
-      <div class="form-group" style="margin-bottom: 12px;">
-        <label style="font-weight: 600; font-size: 0.85rem; display: block; margin-bottom: 4px;">Pilih Siswa Asuhan:</label>
-        <select id="modal-jb-siswa" class="form-control" required>
-          ${siswaOptions}
-        </select>
-      </div>
+      ${renderStudentComboboxHtml({
+        id: "modal-jb-siswa",
+        students: studentChoices,
+        selectedId: activeSiswaId,
+        manualName: existing ? existing.siswaNama : "",
+        placeholder: "Ketik nama siswa / NISN, atau klik ▾ untuk daftar dropdown...",
+        required: true,
+        label: "Pilih Siswa Asuhan: *"
+      })}
 
       <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px;">
         <div>
@@ -15421,22 +17095,51 @@ function openJurnalBimbinganModal(jurnalId = null, defaultSiswaId = null) {
   `;
 
   openModal(existing ? "Edit Jurnal Bimbingan" : "Catat Bimbingan Siswa Asuhan", modalHtml, footerHtml, false);
+  initStudentCombobox("modal-jb-siswa", studentChoices);
 }
 
 function handleSaveJurnalBimbingan(event, jurnalId) {
   if (event) event.preventDefault();
 
-  const siswaId = document.getElementById("modal-jb-siswa")?.value;
+  const siswaIdEl = document.getElementById("modal-jb-siswa");
+  const siswaNamaEl = document.getElementById("modal-cw-siswa-nama");
+  const siswaInputEl = document.getElementById("modal-jb-siswa-input");
+
+  let siswaId = siswaIdEl ? siswaIdEl.value.trim() : "";
+  let siswaNama = siswaNamaEl ? siswaNamaEl.value.trim() : "";
+  const typedText = siswaInputEl ? siswaInputEl.value.trim() : "";
+
+  if (!siswaId && typedText) {
+    const reg = window._studentComboboxRegistry["modal-jb-siswa"];
+    const currentStudents = reg ? reg.students : (db.siswa || []);
+    const match = currentStudents.find(s => {
+      const k = (db.kelas || []).find(cl => cl.id === s.kelasId) || { nama: "" };
+      return s.nama.toLowerCase() === typedText.toLowerCase() ||
+             `${s.nama} (${k.nama})`.toLowerCase() === typedText.toLowerCase() ||
+             (s.nisn && s.nisn === typedText);
+    });
+    if (match) {
+      siswaId = match.id;
+      siswaNama = match.nama;
+    } else {
+      siswaId = "manual_" + Date.now();
+      siswaNama = typedText;
+    }
+  }
+
   const tanggal = document.getElementById("modal-jb-tanggal")?.value;
   const status = document.getElementById("modal-jb-status")?.value;
   const bidang = document.getElementById("modal-jb-bidang")?.value;
   const pokokBahasan = document.getElementById("modal-jb-pokok")?.value?.trim();
   const tindakLanjut = document.getElementById("modal-jb-tindak-lanjut")?.value?.trim();
 
-  if (!siswaId || !pokokBahasan) {
-    alert("Harap pilih siswa dan isi pokok bahasan bimbingan.");
+  if ((!siswaId && !siswaNama && !typedText) || !pokokBahasan) {
+    alert("Harap pilih atau ketik nama siswa dan isi pokok bahasan bimbingan.");
     return;
   }
+
+  const targetStudent = db.siswa.find(s => s.id === siswaId);
+  const resolvedNama = siswaNama || (targetStudent ? targetStudent.nama : typedText);
 
   db.jurnalBimbingan = db.jurnalBimbingan || [];
 
@@ -15446,6 +17149,7 @@ function handleSaveJurnalBimbingan(event, jurnalId) {
       db.jurnalBimbingan[idx] = {
         ...db.jurnalBimbingan[idx],
         siswaId,
+        siswaNama: resolvedNama,
         tanggal,
         status,
         bidang,
@@ -15458,6 +17162,7 @@ function handleSaveJurnalBimbingan(event, jurnalId) {
     db.jurnalBimbingan.push({
       id: "jb-" + Date.now() + Math.random().toString(36).substr(2, 4),
       siswaId,
+      siswaNama: resolvedNama,
       tanggal,
       status,
       bidang,
@@ -15482,7 +17187,159 @@ function deleteJurnalBimbingan(id) {
   db.jurnalBimbingan = (db.jurnalBimbingan || []).filter(j => j.id !== id);
   saveDatabase(true);
   showToast("Jurnal bimbingan berhasil dihapus.");
-  renderJurnalBimbinganGuruWali(document.getElementById("content-area"));
+  renderJurnalBimbinganGuruWali(document.getElementById("content-container") || document.getElementById("content-area"));
+}
+
+function printLaporanJurnalBimbinganGuruWali() {
+  db.jurnalBimbingan = db.jurnalBimbingan || [];
+  const list = [...db.jurnalBimbingan].sort((a, b) => new Date(b.tanggal || b.createdAt) - new Date(a.tanggal || a.createdAt));
+
+  const teacherName = (db.guruProfile && db.guruProfile.nama) ? db.guruProfile.nama : "Guru Wali";
+  const teacherNip = (db.guruProfile && db.guruProfile.nip) ? `NIP. ${db.guruProfile.nip}` : "-";
+  const kepalaSekolah = (db.guruProfile && db.guruProfile.kepalaSekolah) ? db.guruProfile.kepalaSekolah : "Kepala Sekolah, M.Pd.";
+  const kepalaNip = (db.guruProfile && db.guruProfile.kepalaSekolahNip) ? `NIP. ${db.guruProfile.kepalaSekolahNip}` : "-";
+  const userSchool = getCurrentSchoolName();
+  const schoolAddress = (db.guruProfile && db.guruProfile.alamat) ? db.guruProfile.alamat : "Sulawesi Tenggara";
+
+  const win = window.open("", "_blank");
+  if (!win) {
+    alert("Jendela pop-up diblokir peramban Anda. Harap izinkan pop-up untuk mencetak laporan.");
+    return;
+  }
+
+  win.document.write(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Laporan Jurnal Bimbingan Siswa Asuhan - Guru Wali</title>
+      <style>
+        body { font-family: 'Times New Roman', Times, serif; margin: 15mm 15mm; color: #000; line-height: 1.4; font-size: 11pt; }
+        .kop { text-align: center; border-bottom: 3px double #000; padding-bottom: 8px; margin-bottom: 14px; }
+        .kop h2 { margin: 0; font-size: 13pt; text-transform: uppercase; font-weight: bold; }
+        .kop h3 { margin: 2px 0; font-size: 15pt; text-transform: uppercase; font-weight: bold; }
+        .kop p { margin: 0; font-size: 9.5pt; font-style: italic; }
+        h4 { text-align: center; margin: 12px 0 4px; font-size: 13pt; text-transform: uppercase; font-weight: bold; }
+        .subtitle { text-align: center; margin: 0 0 14px; font-size: 10.5pt; }
+        table.meta { width: 100%; margin-bottom: 10px; font-size: 10.5pt; border-collapse: collapse; }
+        table.meta td { padding: 3px 0; border: none; }
+        table.data { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 9.5pt; }
+        table.data th, table.data td { border: 1px solid #000; padding: 6px 8px; vertical-align: top; }
+        table.data th { background: #f0f0f0; text-align: center; font-weight: bold; }
+        .ttd-box { margin-top: 32px; display: flex; justify-content: space-between; text-align: center; font-size: 11pt; page-break-inside: avoid; }
+        .ttd-col { width: 45%; }
+        .ttd-space { height: 65px; }
+        @media print {
+          @page { size: A4 landscape; margin: 12mm; }
+        }
+      </style>
+    </head>
+    <body>
+      <div class="kop">
+        <h2>PEMERINTAH DAERAH PROVINSI SULAWESI TENGGARA</h2>
+        <h2>DINAS PENDIDIKAN DAN KEBUDAYAAN</h2>
+        <h3>${escapeHtml(userSchool)}</h3>
+        <p>${escapeHtml(schoolAddress)}</p>
+      </div>
+
+      <h4>JURNAL PELAKSANAAN BIMBINGAN DAN PENDAMPINGAN SISWA ASUHAN</h4>
+      <div class="subtitle">Laporan Kegiatan Guru Wali / Mentor Pembimbing Siswa</div>
+
+      <table class="meta">
+        <tr>
+          <td style="width: 18%;"><strong>Guru Wali / Mentor</strong></td>
+          <td style="width: 32%;">: ${escapeHtml(teacherName)}</td>
+          <td style="width: 18%;"><strong>Total Sesi Bimbingan</strong></td>
+          <td style="width: 32%;">: ${list.length} Sesi</td>
+        </tr>
+        <tr>
+          <td><strong>NIP</strong></td>
+          <td>: ${escapeHtml(teacherNip)}</td>
+          <td><strong>Tanggal Cetak</strong></td>
+          <td>: ${formatDateIndoFull(getLocalDateString())}</td>
+        </tr>
+      </table>
+
+      <table class="data">
+        <thead>
+          <tr>
+            <th style="width: 30px;">No</th>
+            <th style="width: 80px;">Tanggal</th>
+            <th style="width: 140px;">Nama Siswa Asuhan</th>
+            <th style="width: 70px;">Kelas</th>
+            <th style="width: 110px;">Bidang Bimbingan</th>
+            <th>Pokok Bahasan / Uraian Masalah</th>
+            <th>Rencana Tindak Lanjut / Arahan Mentor</th>
+            <th style="width: 80px;">Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${list.length === 0 ? `
+            <tr><td colspan="8" style="text-align: center; padding: 25px;">Belum ada catatan jurnal bimbingan terdata.</td></tr>
+          ` : list.map((jb, idx) => {
+            const student = db.siswa.find(s => s.id === jb.siswaId) || { nama: jb.siswaNama || "Siswa", nisn: "-", kelasId: "" };
+            const kelas = db.kelas.find(k => k.id === student.kelasId) || { nama: "-" };
+            return `
+              <tr>
+                <td style="text-align: center;">${idx + 1}</td>
+                <td style="text-align: center;">${jb.tanggal || '-'}</td>
+                <td><strong>${escapeHtml(student.nama)}</strong></td>
+                <td style="text-align: center;">${escapeHtml(kelas.nama)}</td>
+                <td>${escapeHtml(jb.bidang || '-')}</td>
+                <td>${escapeHtml(jb.pokokBahasan || '-').replace(/\n/g, '<br>')}</td>
+                <td>${escapeHtml(jb.tindakLanjut || '-').replace(/\n/g, '<br>')}</td>
+                <td style="text-align: center; font-weight: bold; color: ${jb.status === 'Tuntas' ? '#059669' : '#7c3aed'};">
+                  ${escapeHtml(jb.status || 'Dalam Proses')}
+                </td>
+              </tr>
+            `;
+          }).join("")}
+        </tbody>
+      </table>
+
+      <div class="ttd-box">
+        <div class="ttd-col">
+          <div>Mengetahui,</div>
+          <div>Kepala Sekolah</div>
+          <div class="ttd-space"></div>
+          <div style="font-weight: bold; text-decoration: underline;">${escapeHtml(kepalaSekolah)}</div>
+          <div>${escapeHtml(kepalaNip)}</div>
+        </div>
+        <div class="ttd-col">
+          <div>Lasolo, ${formatDateIndo(getLocalDateString())}</div>
+          <div>Guru Wali / Mentor Asuhan</div>
+          <div class="ttd-space"></div>
+          <div style="font-weight: bold; text-decoration: underline;">${escapeHtml(teacherName)}</div>
+          <div>${escapeHtml(teacherNip)}</div>
+        </div>
+      </div>
+
+      <script>
+        window.onload = function() {
+          window.print();
+        }
+      </script>
+    </body>
+    </html>
+  `);
+  win.document.close();
+}
+
+function exportJurnalBimbinganCSV() {
+  db.jurnalBimbingan = db.jurnalBimbingan || [];
+  const list = [...db.jurnalBimbingan].sort((a, b) => new Date(b.tanggal || b.createdAt) - new Date(a.tanggal || a.createdAt));
+
+  let csv = `JURNAL BIMBINGAN SISWA ASUHAN GURU WALI\r\n\r\n`;
+  csv += "No;Tanggal;Nama Siswa;NISN;Kelas;Bidang Bimbingan;Pokok Bahasan;Rencana Tindak Lanjut;Status\r\n";
+
+  list.forEach((jb, idx) => {
+    const student = db.siswa.find(s => s.id === jb.siswaId) || { nama: jb.siswaNama || "Siswa", nisn: "-", kelasId: "" };
+    const kelas = db.kelas.find(k => k.id === student.kelasId) || { nama: "-" };
+    const pokokClean = (jb.pokokBahasan || "").replace(/[\r\n]+/g, " ");
+    const tlClean = (jb.tindakLanjut || "").replace(/[\r\n]+/g, " ");
+    csv += `${idx + 1};"${jb.tanggal || ''}";"${student.nama}";"${student.nisn || ''}";"${kelas.nama}";"${jb.bidang || ''}";"${pokokClean}";"${tlClean}";"${jb.status || ''}"\r\n`;
+  });
+
+  downloadCSV(csv, `jurnal_bimbingan_guru_wali_${getLocalDateString()}.csv`);
 }
 
 function sendJurnalBimbinganWA(id) {
@@ -16482,8 +18339,8 @@ function renderDashboardGuruBK(container) {
           ` : `
             <div style="display: flex; flex-direction: column; gap: 10px;">
               ${recentSessions.map(item => {
-                const s = (db.siswa || []).find(x => x.id === item.siswaId) || { nama: "Siswa", kelasId: "-" };
-                const k = (db.kelas || []).find(x => x.id === s.kelasId) || { nama: "-" };
+                const s = (db.siswa || []).find(x => x.id === item.siswaId) || { nama: item.siswaNama || "Siswa", kelasId: item.kelasId || "-" };
+                const k = (db.kelas || []).find(x => x.id === (item.kelasId || s.kelasId)) || { nama: "-" };
                 const contact = getStudentParentContact(s.id);
                 const badgeBidangClass = item.bidang === 'Pribadi' ? 'badge-bk-pribadi' : item.bidang === 'Sosial' ? 'badge-bk-sosial' : item.bidang === 'Belajar' ? 'badge-bk-belajar' : 'badge-bk-karir';
                 const statusBadgeClass = item.status === 'Tuntas' ? 'badge-bk-selesai' : item.status === 'Alih Tangan' ? 'badge-bk-rujukan' : 'badge-bk-proses';
@@ -16574,8 +18431,9 @@ function renderDashboardGuruBK(container) {
     </div>
   `;
 
-  // Render sub-radars
-  renderDashboardIntervention();
+  // Render sub-radars untuk HARI INI
+  const todayStr = getLocalDateString();
+  renderDashboardIntervention(todayStr);
   renderDashboardAcademicAlerts();
 }
 
@@ -16707,7 +18565,7 @@ function renderKonselingBK(container) {
                 </td>
               </tr>
             ` : list.map((item, idx) => {
-              const student = (db.siswa || []).find(s => s.id === item.siswaId) || { nama: "Siswa", nisn: "-", kelasId: "" };
+              const student = (db.siswa || []).find(s => s.id === item.siswaId) || { nama: item.siswaNama || "Siswa", nisn: "-", kelasId: item.kelasId || "" };
               const kelas = (db.kelas || []).find(k => k.id === (item.kelasId || student.kelasId)) || { nama: "-" };
               const contact = getStudentParentContact(student.id);
 
@@ -16716,7 +18574,7 @@ function renderKonselingBK(container) {
               const urgencyBadgeClass = item.urgensi === 'Mendesak' ? 'badge-urgensi-tinggi' : item.urgensi === 'Sedang' ? 'badge-urgensi-sedang' : 'badge-urgensi-rendah';
 
               return `
-                <tr data-id="${item.id}" data-kelas="${kelas.id || student.kelasId || ''}" data-bidang="${item.bidang || ''}" data-layanan="${item.jenisLayanan || ''}" data-status="${item.status || ''}" data-search="${(student.nama + ' ' + (student.nisn || '') + ' ' + (item.gejala || '') + ' ' + (item.uraian || '')).toLowerCase()}">
+                <tr data-id="${item.id}" data-kelas="${kelas.id || student.kelasId || ''}" data-bidang="${item.bidang || ''}" data-layanan="${item.jenisLayanan || ''}" data-status="${item.status || ''}" data-search="${((student.nama || item.siswaNama || '') + ' ' + (student.nisn || '') + ' ' + (item.gejala || '') + ' ' + (item.uraian || '')).toLowerCase()}">
                   <td style="text-align: center;">${idx + 1}</td>
                   <td>
                     <div style="font-weight: 600; font-size: 0.85rem;">${formatDateIndo(item.tanggal)}</div>
@@ -16724,7 +18582,8 @@ function renderKonselingBK(container) {
                   </td>
                   <td style="font-weight: 700; color: var(--text-main);">
                     ${student.nama}
-                    ${student.nisn ? `<div style="font-size: 0.72rem; color: var(--text-muted); font-weight: normal;">NISN: ${student.nisn}</div>` : ''}
+                    ${student.nisn && student.nisn !== '-' ? `<div style="font-size: 0.72rem; color: var(--text-muted); font-weight: normal;">NISN: ${student.nisn}</div>` : ''}
+                    ${(!student.id || student.id.startsWith('manual_') || (item.siswaId && item.siswaId.startsWith('manual_'))) ? `<span class="badge" style="font-size: 0.65rem; background: rgba(245, 158, 11, 0.15); color: #d97706; border: 1px solid rgba(245, 158, 11, 0.3); margin-top: 2px;">Manual</span>` : ''}
                   </td>
                   <td><span class="badge" style="background:var(--bg-app); border:1px solid var(--border-color);">${kelas.nama}</span></td>
                   <td><span class="badge ${badgeBidangClass}">${item.bidang || 'Pribadi'}</span></td>
@@ -16867,12 +18726,15 @@ function openKonselingBKModal(counselingId = null, defaultSiswaId = null, defaul
         <span><strong>Asas Kerahasiaan Konseling:</strong> Informasi konseling siswa bersifat rahasia dan hanya digunakan untuk kepentingan pendampingan perkembangan siswa.</span>
       </div>
 
-      <div class="form-group" style="margin-bottom: 12px;">
-        <label style="font-weight: 700; font-size: 0.85rem; display: block; margin-bottom: 4px;">Pilih Siswa yang Diberi Layanan: *</label>
-        <select id="modal-bk-siswa" class="form-control" required style="font-weight: 600;">
-          ${studentOptions}
-        </select>
-      </div>
+      ${renderStudentComboboxHtml({
+        id: "modal-bk-siswa",
+        students: allStudents,
+        selectedId: existing ? existing.siswaId : (defaultSiswaId || (allStudents[0] ? allStudents[0].id : "")),
+        manualName: existing ? existing.siswaNama : "",
+        placeholder: "Ketik nama siswa / NISN, atau klik ▾ untuk daftar dropdown...",
+        required: true,
+        label: "Pilih Siswa yang Diberi Layanan: *"
+      })}
 
       <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px;">
         <div>
@@ -16955,12 +18817,40 @@ function openKonselingBKModal(counselingId = null, defaultSiswaId = null, defaul
   `;
 
   openModal(counselingId ? "Edit Sesi Layanan Bimbingan & Konseling" : "Catat Sesi Layanan Bimbingan & Konseling Baru", bodyHtml, footerHtml, true);
+  initStudentCombobox("modal-bk-siswa", allStudents);
 }
 
 function handleSaveKonselingBK(event, counselingId) {
   if (event) event.preventDefault();
 
-  const siswaId = document.getElementById("modal-bk-siswa").value;
+  const siswaIdEl = document.getElementById("modal-bk-siswa");
+  const siswaNamaEl = document.getElementById("modal-bk-siswa-nama");
+  const siswaKelasEl = document.getElementById("modal-bk-siswa-kelas");
+  const siswaInputEl = document.getElementById("modal-bk-siswa-input");
+
+  let siswaId = siswaIdEl ? siswaIdEl.value.trim() : "";
+  let siswaNama = siswaNamaEl ? siswaNamaEl.value.trim() : "";
+  const typedText = siswaInputEl ? siswaInputEl.value.trim() : "";
+
+  // Auto-resolve if user typed directly without selecting from dropdown
+  if (!siswaId && typedText) {
+    const reg = window._studentComboboxRegistry["modal-bk-siswa"];
+    const allStudents = reg ? reg.students : (db.siswa || []);
+    const match = allStudents.find(s => {
+      const k = (db.kelas || []).find(cl => cl.id === s.kelasId) || { nama: "" };
+      return s.nama.toLowerCase() === typedText.toLowerCase() ||
+             `${s.nama} (${k.nama})`.toLowerCase() === typedText.toLowerCase() ||
+             (s.nisn && s.nisn === typedText);
+    });
+    if (match) {
+      siswaId = match.id;
+      siswaNama = match.nama;
+    } else {
+      siswaId = "manual_" + Date.now();
+      siswaNama = typedText;
+    }
+  }
+
   const tanggal = document.getElementById("modal-bk-tanggal").value;
   const waktu = document.getElementById("modal-bk-waktu").value;
   const bidang = document.getElementById("modal-bk-bidang").value;
@@ -16973,34 +18863,40 @@ function handleSaveKonselingBK(event, counselingId) {
   const status = document.getElementById("modal-bk-status").value;
   const catatan = document.getElementById("modal-bk-catatan").value.trim();
 
-  if (!siswaId || !tanggal || !gejala || !tindakLanjut) {
-    alert("Mohon lengkapi seluruh field bertanda bintang (*)");
+  if ((!siswaId && !siswaNama && !typedText) || !tanggal || !gejala || !tindakLanjut) {
+    alert("Mohon lengkapi seluruh field bertanda bintang (*), termasuk memilih atau mengetik nama siswa.");
     return;
   }
 
   const student = (db.siswa || []).find(s => s.id === siswaId);
-  const kelasId = student ? student.kelasId : "";
+  const kelasId = student ? student.kelasId : (siswaKelasEl ? siswaKelasEl.value : "");
+  const resolvedNama = student ? student.nama : (siswaNama || typedText);
 
   db.layananBK = db.layananBK || [];
+
+  const recordPayload = {
+    siswaId: student ? student.id : (siswaId || "manual_" + Date.now()),
+    siswaNama: resolvedNama,
+    kelasId: kelasId || "",
+    tanggal,
+    waktu,
+    bidang,
+    jenisLayanan,
+    urgensi,
+    sumber,
+    gejala,
+    uraian,
+    tindakLanjut,
+    status,
+    catatan
+  };
 
   if (counselingId) {
     const idx = db.layananBK.findIndex(x => x.id === counselingId);
     if (idx !== -1) {
       db.layananBK[idx] = {
         ...db.layananBK[idx],
-        siswaId,
-        kelasId,
-        tanggal,
-        waktu,
-        bidang,
-        jenisLayanan,
-        urgensi,
-        sumber,
-        gejala,
-        uraian,
-        tindakLanjut,
-        status,
-        catatan,
+        ...recordPayload,
         updatedAt: new Date().toISOString()
       };
     }
@@ -17008,19 +18904,7 @@ function handleSaveKonselingBK(event, counselingId) {
     const newId = "bk-" + Date.now();
     db.layananBK.push({
       id: newId,
-      siswaId,
-      kelasId,
-      tanggal,
-      waktu,
-      bidang,
-      jenisLayanan,
-      urgensi,
-      sumber,
-      gejala,
-      uraian,
-      tindakLanjut,
-      status,
-      catatan,
+      ...recordPayload,
       createdAt: new Date().toISOString()
     });
   }
@@ -17058,7 +18942,7 @@ function openDetailKonselingBKModal(id) {
   const item = (db.layananBK || []).find(x => x.id === id);
   if (!item) return;
 
-  const s = (db.siswa || []).find(x => x.id === item.siswaId) || { nama: "Siswa", nisn: "-", jenisKelamin: "-", alamat: "-" };
+  const s = (db.siswa || []).find(x => x.id === item.siswaId) || { nama: item.siswaNama || "Siswa", nisn: "-", jenisKelamin: "-", alamat: "-" };
   const k = (db.kelas || []).find(x => x.id === (item.kelasId || s.kelasId)) || { nama: "-" };
   const contact = getStudentParentContact(s.id);
   const teacherName = (db.guruProfile && db.guruProfile.nama) ? db.guruProfile.nama : "Guru BK";
@@ -17182,7 +19066,7 @@ function exportKonselingBKCSV() {
   let csv = "No;Tanggal;Waktu;Nama Siswa;NISN;Kelas;Bidang;Jenis Layanan;Urgensi;Sumber Rujukan;Masalah;Rencana Tindak Lanjut;Status;Catatan Kerahasiaan\r\n";
 
   list.forEach((item, idx) => {
-    const s = (db.siswa || []).find(x => x.id === item.siswaId) || { nama: "Siswa", nisn: "", kelasId: "" };
+    const s = (db.siswa || []).find(x => x.id === item.siswaId) || { nama: item.siswaNama || "Siswa", nisn: "", kelasId: item.kelasId || "" };
     const k = (db.kelas || []).find(x => x.id === (item.kelasId || s.kelasId)) || { nama: "-" };
 
     const clean = str => `"${(str || '').replace(/"/g, '""').replace(/\r?\n/g, ' ')}"`;
@@ -17696,12 +19580,15 @@ function openPeminatanKarirModal(karirId = null, defaultSiswaId = null) {
 
   const bodyHtml = `
     <form id="form-peminatan-karir" onsubmit="handleSavePeminatanKarir(event, '${existing ? existing.id : ''}')">
-      <div class="form-group" style="margin-bottom: 12px;">
-        <label style="font-weight: 700; font-size: 0.85rem; display: block; margin-bottom: 4px;">Pilih Siswa: *</label>
-        <select id="modal-karir-siswa" class="form-control" required style="font-weight: 600;">
-          ${studentOptions}
-        </select>
-      </div>
+      ${renderStudentComboboxHtml({
+        id: "modal-karir-siswa",
+        students: allStudents,
+        selectedId: activeSiswaId,
+        manualName: existing ? existing.siswaNama : "",
+        placeholder: "Ketik nama siswa / NISN, atau klik ▾ untuk daftar dropdown...",
+        required: true,
+        label: "Pilih Siswa: *"
+      })}
 
       <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px;">
         <div>
@@ -17743,20 +19630,46 @@ function openPeminatanKarirModal(karirId = null, defaultSiswaId = null) {
   `;
 
   openModal("Input / Perbarui Peminatan Karir Siswa", bodyHtml, footerHtml);
+  initStudentCombobox("modal-karir-siswa", allStudents);
 }
 
 function handleSavePeminatanKarir(event, karirId) {
   if (event) event.preventDefault();
 
-  const siswaId = document.getElementById("modal-karir-siswa").value;
+  const siswaIdEl = document.getElementById("modal-karir-siswa");
+  const siswaNamaEl = document.getElementById("modal-karir-siswa-nama");
+  const siswaInputEl = document.getElementById("modal-karir-siswa-input");
+
+  let siswaId = siswaIdEl ? siswaIdEl.value.trim() : "";
+  let siswaNama = siswaNamaEl ? siswaNamaEl.value.trim() : "";
+  const typedText = siswaInputEl ? siswaInputEl.value.trim() : "";
+
+  if (!siswaId && typedText) {
+    const reg = window._studentComboboxRegistry["modal-karir-siswa"];
+    const allStudents = reg ? reg.students : (db.siswa || []);
+    const match = allStudents.find(s => {
+      const k = (db.kelas || []).find(cl => cl.id === s.kelasId) || { nama: "" };
+      return s.nama.toLowerCase() === typedText.toLowerCase() ||
+             `${s.nama} (${k.nama})`.toLowerCase() === typedText.toLowerCase() ||
+             (s.nisn && s.nisn === typedText);
+    });
+    if (match) {
+      siswaId = match.id;
+      siswaNama = match.nama;
+    } else {
+      siswaId = "manual_" + Date.now();
+      siswaNama = typedText;
+    }
+  }
+
   const rencanaStudi = document.getElementById("modal-karir-rencana").value;
   const jalurMasuk = document.getElementById("modal-karir-jalur").value;
   const target1 = document.getElementById("modal-karir-target1").value.trim();
   const target2 = document.getElementById("modal-karir-target2").value.trim();
   const catatanBakat = document.getElementById("modal-karir-catatan").value.trim();
 
-  if (!siswaId) {
-    alert("Silakan pilih siswa!");
+  if (!siswaId && !siswaNama && !typedText) {
+    alert("Silakan pilih siswa atau ketik nama siswa!");
     return;
   }
 
@@ -17958,12 +19871,15 @@ function openAgendaBKModal(agendaId = null, defaultSiswaId = null) {
 
   const bodyHtml = `
     <form id="form-agenda-bk" onsubmit="handleSaveAgendaBK(event, '${agendaId || ''}')">
-      <div class="form-group" style="margin-bottom: 12px;">
-        <label style="font-weight: 700; font-size: 0.85rem; display: block; margin-bottom: 4px;">Pilih Siswa: *</label>
-        <select id="modal-ag-siswa" class="form-control" required style="font-weight: 600;">
-          ${studentOptions}
-        </select>
-      </div>
+      ${renderStudentComboboxHtml({
+        id: "modal-ag-siswa",
+        students: allStudents,
+        selectedId: activeSiswaId,
+        manualName: existing ? existing.siswaNama : "",
+        placeholder: "Ketik nama siswa / NISN, atau klik ▾ untuk daftar dropdown...",
+        required: true,
+        label: "Pilih Siswa: *"
+      })}
 
       <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px;">
         <div>
@@ -18012,12 +19928,38 @@ function openAgendaBKModal(agendaId = null, defaultSiswaId = null) {
   `;
 
   openModal("Jadwalkan Janji Temu Konseling / Home Visit", bodyHtml, footerHtml);
+  initStudentCombobox("modal-ag-siswa", allStudents);
 }
 
 function handleSaveAgendaBK(event, agendaId) {
   if (event) event.preventDefault();
 
-  const siswaId = document.getElementById("modal-ag-siswa").value;
+  const siswaIdEl = document.getElementById("modal-ag-siswa");
+  const siswaNamaEl = document.getElementById("modal-ag-siswa-nama");
+  const siswaInputEl = document.getElementById("modal-ag-siswa-input");
+
+  let siswaId = siswaIdEl ? siswaIdEl.value.trim() : "";
+  let siswaNama = siswaNamaEl ? siswaNamaEl.value.trim() : "";
+  const typedText = siswaInputEl ? siswaInputEl.value.trim() : "";
+
+  if (!siswaId && typedText) {
+    const reg = window._studentComboboxRegistry["modal-ag-siswa"];
+    const allStudents = reg ? reg.students : (db.siswa || []);
+    const match = allStudents.find(s => {
+      const k = (db.kelas || []).find(cl => cl.id === s.kelasId) || { nama: "" };
+      return s.nama.toLowerCase() === typedText.toLowerCase() ||
+             `${s.nama} (${k.nama})`.toLowerCase() === typedText.toLowerCase() ||
+             (s.nisn && s.nisn === typedText);
+    });
+    if (match) {
+      siswaId = match.id;
+      siswaNama = match.nama;
+    } else {
+      siswaId = "manual_" + Date.now();
+      siswaNama = typedText;
+    }
+  }
+
   const tanggal = document.getElementById("modal-ag-tanggal").value;
   const waktu = document.getElementById("modal-ag-waktu").value;
   const kegiatan = document.getElementById("modal-ag-kegiatan").value;
@@ -18025,7 +19967,7 @@ function handleSaveAgendaBK(event, agendaId) {
   const keterangan = document.getElementById("modal-ag-ket").value.trim();
   const status = document.getElementById("modal-ag-status").value;
 
-  if (!siswaId || !tanggal) {
+  if ((!siswaId && !siswaNama && !typedText) || !tanggal) {
     alert("Silakan lengkapi siswa dan tanggal pertemuan!");
     return;
   }
