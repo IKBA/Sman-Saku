@@ -50,7 +50,8 @@ const DEFAULT_SEEDS = {
   layananBK: [],
   peminatanKarirBK: [],
   agendaBK: [],
-  kelasBimbinganBK: []
+  kelasBimbinganBK: [],
+  piketAssignments: {}
 };
 
 // Ekspor agar bisa diakses atau di-import

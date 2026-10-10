@@ -197,6 +197,7 @@ const APP_BUILD_VERSION = "1.2.4_20261007";
 
 const MASTER_CLASSES_KEY = "saku_guru_master_kelas";
 const MASTER_STUDENTS_KEY = "saku_guru_master_siswa";
+const PIKET_ASSIGNMENTS_KEY = "saku_guru_piket_assignments";
 // Helper: Normalisasi gelar akademis dan tanda baca untuk pencocokan nama guru
 function normalizeTeacherName(str) {
   if (!str) return "";
@@ -311,6 +312,11 @@ async function fetchAdminMasterClasses() {
         localStorage.setItem(MASTER_CLASSES_KEY, JSON.stringify(data.data.kelas));
         if (Array.isArray(data.data.siswa) && data.data.siswa.length > 0) {
           localStorage.setItem(MASTER_STUDENTS_KEY, JSON.stringify(data.data.siswa));
+        }
+        if (data.data.piketAssignments && typeof data.data.piketAssignments === 'object') {
+          Object.keys(data.data.piketAssignments).forEach(em => {
+            savePiketAssignment(em, data.data.piketAssignments[em]);
+          });
         }
         return data.data.kelas;
       }
@@ -437,6 +443,74 @@ function getUserKelasWaliIdFromStorage(email) {
     const u = storedUsers.find(x => x.email && x.email.trim().toLowerCase() === email.trim().toLowerCase());
     return (u && u.kelasWaliId) ? String(u.kelasWaliId) : "";
   } catch(e) { return ""; }
+}
+
+function getPiketAssignments() {
+  let map = {};
+  try {
+    const raw = localStorage.getItem(PIKET_ASSIGNMENTS_KEY);
+    if (raw) map = JSON.parse(raw) || {};
+  } catch(e) {}
+  if (typeof db !== "undefined" && db && db.piketAssignments && typeof db.piketAssignments === "object") {
+    map = { ...db.piketAssignments, ...map };
+  }
+  return map;
+}
+
+function savePiketAssignment(email, hari) {
+  if (!email) return;
+  const cleanEmail = email.toLowerCase().trim();
+  let map = getPiketAssignments();
+  if (hari) {
+    map[cleanEmail] = hari;
+  } else {
+    delete map[cleanEmail];
+  }
+  try {
+    localStorage.setItem(PIKET_ASSIGNMENTS_KEY, JSON.stringify(map));
+  } catch(e) {}
+  if (typeof db !== "undefined" && db) {
+    db.piketAssignments = db.piketAssignments || {};
+    if (hari) {
+      db.piketAssignments[cleanEmail] = hari;
+    } else {
+      delete db.piketAssignments[cleanEmail];
+    }
+  }
+}
+
+function getUserHariPiket(userOrEmail) {
+  if (!userOrEmail) return "";
+  const email = (typeof userOrEmail === "string" ? userOrEmail : (userOrEmail.email || "")).toLowerCase().trim();
+  if (!email) return "";
+
+  // 1. Dari property langsung user jika ada
+  if (typeof userOrEmail === "object" && userOrEmail.hariPiket) {
+    return userOrEmail.hariPiket;
+  }
+
+  // 2. Dari map penugasan piket (localStorage & db)
+  const map = getPiketAssignments();
+  if (map && map[email]) {
+    return map[email];
+  }
+
+  // 3. Dari USERS_STORAGE_KEY lokal
+  try {
+    const storedUsers = JSON.parse(localStorage.getItem(USERS_STORAGE_KEY) || "[]");
+    const u = storedUsers.find(x => x && x.email && x.email.toLowerCase() === email);
+    if (u && u.hariPiket) return u.hariPiket;
+  } catch(e) {}
+
+  // 4. Deteksi otomatis dari alamat email
+  if (email.includes("senin") || email === "piket@smansaku.id") return "Senin";
+  if (email.includes("selasa")) return "Selasa";
+  if (email.includes("rabu")) return "Rabu";
+  if (email.includes("kamis")) return "Kamis";
+  if (email.includes("jumat")) return "Jumat";
+  if (email.includes("sabtu")) return "Sabtu";
+
+  return "";
 }
 
 function ensureClassInCurrentDb(classObj) {
@@ -731,13 +805,18 @@ async function getRegisteredUsers() {
     try { localUsers = JSON.parse(stored); } catch(e) {}
   }
 
-  // Jika data diambil dari cloud, pertahankan kelasWaliId dari lokal agar tidak terhapus
-  if (users && Array.isArray(users) && localUsers && localUsers.length > 0) {
+  // Jika data diambil dari cloud, pertahankan kelasWaliId dan hariPiket dari lokal/piket-assignments agar tidak terhapus
+  if (users && Array.isArray(users)) {
     users = users.map(u => {
-      const localMatch = localUsers.find(lu => lu.email && lu.email.toLowerCase() === (u.email || "").toLowerCase());
+      const uEmail = (u.email || "").toLowerCase();
+      const localMatch = (localUsers && localUsers.length > 0)
+        ? localUsers.find(lu => lu.email && lu.email.toLowerCase() === uEmail)
+        : null;
+      const detectedHari = u.hariPiket || (localMatch ? localMatch.hariPiket : "") || getUserHariPiket(u);
       return {
         ...u,
-        kelasWaliId: u.kelasWaliId || (localMatch ? localMatch.kelasWaliId : undefined)
+        kelasWaliId: u.kelasWaliId || (localMatch ? localMatch.kelasWaliId : undefined),
+        hariPiket: detectedHari || undefined
       };
     });
   } else if (!users) {
@@ -781,6 +860,10 @@ async function getRegisteredUsers() {
   if (!piketSelasaUser) {
     users.push({ email: "piket.selasa@smansaku.id", password: "piket123", nama: "Guru Piket Selasa, S.Pd.", role: "guru_piket", hariPiket: "Selasa" });
     changed = true;
+  } else if (!piketSelasaUser.hariPiket) {
+    piketSelasaUser.hariPiket = "Selasa";
+    piketSelasaUser.nama = "Guru Piket Selasa, S.Pd.";
+    changed = true;
   }
 
   const guruUser = users.find(u => u.email.toLowerCase() === "guru@smansaku.id");
@@ -788,6 +871,15 @@ async function getRegisteredUsers() {
     users.push({ email: "guru@smansaku.id", password: "guru123", nama: "Guru Mata Pelajaran, S.Pd.", role: "guru" });
     changed = true;
   }
+
+  // Sinkronkan penugasan hari piket ke setiap akun pengguna
+  users.forEach(u => {
+    const assigned = getUserHariPiket(u);
+    if (assigned && u.hariPiket !== assigned) {
+      u.hariPiket = assigned;
+      changed = true;
+    }
+  });
 
   if (changed) {
     localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(users));
@@ -798,6 +890,14 @@ async function getRegisteredUsers() {
 async function saveRegisteredUsers(users) {
   // Always save to localStorage as cache/fallback
   localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(users));
+  // Sinkronkan setiap akun yang memiliki hariPiket ke penugasan piket
+  if (Array.isArray(users)) {
+    users.forEach(u => {
+      if (u && u.email && u.hariPiket) {
+        savePiketAssignment(u.email, u.hariPiket);
+      }
+    });
+  }
 }
 
 function getAssignedWaliKelas(session) {
@@ -940,8 +1040,9 @@ function setSession(user) {
   if (user.kelasWaliId) {
     sessionObj.kelasWaliId = user.kelasWaliId;
   }
-  if (user.hariPiket) {
-    sessionObj.hariPiket = user.hariPiket;
+  const resolvedHari = user.hariPiket || getUserHariPiket(user);
+  if (resolvedHari) {
+    sessionObj.hariPiket = resolvedHari;
   }
   localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(sessionObj));
 }
@@ -951,22 +1052,7 @@ function getAssignedHariPiket(session = null) {
   if (!session) return "";
 
   if (session.hariPiket) return session.hariPiket;
-
-  try {
-    const users = JSON.parse(localStorage.getItem(USERS_STORAGE_KEY) || "[]");
-    const found = users.find(u => u.email && u.email.toLowerCase() === session.email.toLowerCase());
-    if (found && found.hariPiket) return found.hariPiket;
-  } catch(e) {}
-
-  const emailLower = (session.email || "").toLowerCase();
-  if (emailLower.includes("senin") || emailLower === "piket@smansaku.id") return "Senin";
-  if (emailLower.includes("selasa")) return "Selasa";
-  if (emailLower.includes("rabu")) return "Rabu";
-  if (emailLower.includes("kamis")) return "Kamis";
-  if (emailLower.includes("jumat")) return "Jumat";
-  if (emailLower.includes("sabtu")) return "Sabtu";
-
-  return "";
+  return getUserHariPiket(session);
 }
 
 function clearSession() {
@@ -1633,7 +1719,8 @@ function extractSharedSchoolData(sourceDb, schoolName) {
     kontakWali: sourceDb.kontakWali || [],
     kelas: sourceDb.kelas || [],
     siswa: sourceDb.siswa || [],
-    deletedRecordIds: sourceDb.deletedRecordIds || []
+    deletedRecordIds: sourceDb.deletedRecordIds || [],
+    piketAssignments: sourceDb.piketAssignments || getPiketAssignments()
   };
 }
 
@@ -1888,6 +1975,19 @@ function mergeSchoolSharedRecords(targetDb, sourceDb, sourceEmail = "") {
         const curS = targetDb.siswa[existIdx];
         if (srcS.noHp && curS.noHp !== srcS.noHp) { curS.noHp = srcS.noHp; changed = true; }
         if (srcS.namaWali && (!curS.namaWali || curS.namaWali === "-")) { curS.namaWali = srcS.namaWali; changed = true; }
+      }
+    });
+  }
+
+  // 9. PENUGASAN HARI GURU PIKET (db.piketAssignments)
+  if (sourceDb.piketAssignments && typeof sourceDb.piketAssignments === 'object') {
+    targetDb.piketAssignments = targetDb.piketAssignments || {};
+    Object.keys(sourceDb.piketAssignments).forEach(email => {
+      const h = sourceDb.piketAssignments[email];
+      if (h && targetDb.piketAssignments[email] !== h) {
+        targetDb.piketAssignments[email] = h;
+        savePiketAssignment(email, h);
+        changed = true;
       }
     });
   }
@@ -13335,9 +13435,10 @@ async function loadUsersTable() {
         if (assigned) {
           penugasanHtml += `<span class="badge" style="background:rgba(16,185,129,0.15); color:#059669; border:1px solid rgba(16,185,129,0.3); font-weight:600;"><i class="fas fa-chalkboard-teacher"></i> Kelas ${escapeHtml(assigned.nama)}</span>`;
         }
-        if (u.hariPiket) {
+        const assignedPiketHari = u.hariPiket || getUserHariPiket(u);
+        if (assignedPiketHari) {
           if (penugasanHtml) penugasanHtml += "<br>";
-          penugasanHtml += `<span class="badge" style="background:rgba(14,165,233,0.15); color:#0284c7; border:1px solid rgba(14,165,233,0.3); font-weight:600; margin-top:2px;"><i class="fas fa-calendar-day"></i> Piket Hari ${escapeHtml(u.hariPiket)}</span>`;
+          penugasanHtml += `<span class="badge" style="background:rgba(14,165,233,0.15); color:#0284c7; border:1px solid rgba(14,165,233,0.3); font-weight:600; margin-top:2px;"><i class="fas fa-calendar-day"></i> Piket Hari ${escapeHtml(assignedPiketHari)}</span>`;
         }
         if (!penugasanHtml) {
           penugasanHtml = `<span style="font-size:0.78rem; color:var(--text-muted);"><i class="fas fa-minus-circle"></i> Tidak Ada Penugasan Khusus</span>`;
@@ -13502,8 +13603,9 @@ async function submitAddUser() {
     }
   }
 
-  users.push({ email, nama, password, role, kelasWaliId, hariPiket });
-  await saveRegisteredUsers(users);
+  if (hariPiket) {
+    savePiketAssignment(email, hariPiket);
+  }
 
   // Jika ditugaskan sebagai wali kelas, sinkronkan ke db.kelas
   if (kelasWaliId) {
@@ -13511,10 +13613,13 @@ async function submitAddUser() {
     if (targetK) {
       targetK.waliKelasEmail = email;
       targetK.waliKelas = nama;
-      await saveDatabase(true);
-      await distributeMasterClassesToAllTeachers(db.kelas, db.siswa);
     }
   }
+  await saveDatabase(true);
+  await distributeMasterClassesToAllTeachers(db.kelas, db.siswa);
+
+  users.push({ email, nama, password, role, kelasWaliId, hariPiket });
+  await saveRegisteredUsers(users);
 
   closeModal();
   await loadUsersTable();
@@ -13543,6 +13648,7 @@ async function showEditUserModal(email) {
     return false;
   });
   const currentAssignedId = currentAssigned ? currentAssigned.id : (user.kelasWaliId || "");
+  const userHariPiket = user.hariPiket || getUserHariPiket(user);
 
   const formHtml = `
     <input type="hidden" id="edit-user-old-email" value="${user.email}">
@@ -13584,12 +13690,12 @@ async function showEditUserModal(email) {
       <label class="form-label" for="edit-user-hari-piket">Penugasan Hari Guru Piket</label>
       <select id="edit-user-hari-piket" class="form-control">
         <option value="">— Bukan Guru Piket / Semua Hari —</option>
-        <option value="Senin" ${user.hariPiket === 'Senin' ? 'selected' : ''}>Hari Senin (Laporan Khusus Hari Senin)</option>
-        <option value="Selasa" ${user.hariPiket === 'Selasa' ? 'selected' : ''}>Hari Selasa (Laporan Khusus Hari Selasa)</option>
-        <option value="Rabu" ${user.hariPiket === 'Rabu' ? 'selected' : ''}>Hari Rabu (Laporan Khusus Hari Rabu)</option>
-        <option value="Kamis" ${user.hariPiket === 'Kamis' ? 'selected' : ''}>Hari Kamis (Laporan Khusus Hari Kamis)</option>
-        <option value="Jumat" ${user.hariPiket === 'Jumat' ? 'selected' : ''}>Hari Jumat (Laporan Khusus Hari Jumat)</option>
-        <option value="Sabtu" ${user.hariPiket === 'Sabtu' ? 'selected' : ''}>Hari Sabtu (Laporan Khusus Hari Sabtu)</option>
+        <option value="Senin" ${userHariPiket === 'Senin' ? 'selected' : ''}>Hari Senin (Laporan Khusus Hari Senin)</option>
+        <option value="Selasa" ${userHariPiket === 'Selasa' ? 'selected' : ''}>Hari Selasa (Laporan Khusus Hari Selasa)</option>
+        <option value="Rabu" ${userHariPiket === 'Rabu' ? 'selected' : ''}>Hari Rabu (Laporan Khusus Hari Rabu)</option>
+        <option value="Kamis" ${userHariPiket === 'Kamis' ? 'selected' : ''}>Hari Kamis (Laporan Khusus Hari Kamis)</option>
+        <option value="Jumat" ${userHariPiket === 'Jumat' ? 'selected' : ''}>Hari Jumat (Laporan Khusus Hari Jumat)</option>
+        <option value="Sabtu" ${userHariPiket === 'Sabtu' ? 'selected' : ''}>Hari Sabtu (Laporan Khusus Hari Sabtu)</option>
       </select>
       <small style="color:var(--text-muted); font-size:0.75rem; display:block; margin-top:4px;">
         <i class="fas fa-info-circle"></i> Jika akun piket ditetapkan hari tugas (misal: Hari Senin), laporan kehadiran seluruh kelas yang tampil hanya khusus hari Senin.
@@ -13713,6 +13819,12 @@ async function submitEditUser() {
     }
   }
 
+  // Sinkronisasi penugasan piket
+  if (oldEmail !== email) {
+    savePiketAssignment(oldEmail, "");
+  }
+  savePiketAssignment(email, hariPiket);
+
   // Sinkronisasi kelas binaan di db.kelas
   (db.kelas || []).forEach(k => {
     if (k.waliKelasEmail && k.waliKelasEmail.toLowerCase() === oldEmail.toLowerCase()) {
@@ -13802,6 +13914,8 @@ async function deleteUser(email) {
         console.error("Supabase deleteUser error:", e);
       }
     }
+
+    savePiketAssignment(targetEmail, "");
 
     let updatedUsers = await getRegisteredUsers();
     updatedUsers = updatedUsers.filter(u => u.email.toLowerCase() !== targetEmail);
