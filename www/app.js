@@ -838,37 +838,26 @@ async function getRegisteredUsers() {
     return defaultUsers;
   }
 
-  // Ensure default demo accounts exist if missing, but NEVER override custom roles set by admin
-  let changed = false;
-  const ikbarUser = users.find(u => u.email.toLowerCase() === "ikbar@smansaku.id");
-  if (!ikbarUser) {
-    users.push({ email: "ikbar@smansaku.id", password: "r@bk10812", nama: "Muh. Ikbar, S.Pd., Gr", role: "guru_bk" });
-    changed = true;
-  }
+  // Filter keluar akun yang sudah sengaja dihapus oleh admin
+  try {
+    const delList = JSON.parse(localStorage.getItem("saku_guru_deleted_users") || "[]");
+    if (delList && Array.isArray(delList) && delList.length > 0) {
+      users = users.filter(u => u && u.email && !delList.includes(u.email.toLowerCase()));
+    }
+  } catch(e) {}
 
+  let changed = false;
   const piketUser = users.find(u => u.email.toLowerCase() === "piket@smansaku.id");
-  if (!piketUser) {
-    users.push({ email: "piket@smansaku.id", password: "piket123", nama: "Guru Piket Senin, S.Pd.", role: "guru_piket", hariPiket: "Senin" });
-    changed = true;
-  } else if (!piketUser.hariPiket) {
+  if (piketUser && !piketUser.hariPiket) {
     piketUser.hariPiket = "Senin";
     piketUser.nama = "Guru Piket Senin, S.Pd.";
     changed = true;
   }
 
   const piketSelasaUser = users.find(u => u.email.toLowerCase() === "piket.selasa@smansaku.id");
-  if (!piketSelasaUser) {
-    users.push({ email: "piket.selasa@smansaku.id", password: "piket123", nama: "Guru Piket Selasa, S.Pd.", role: "guru_piket", hariPiket: "Selasa" });
-    changed = true;
-  } else if (!piketSelasaUser.hariPiket) {
+  if (piketSelasaUser && !piketSelasaUser.hariPiket) {
     piketSelasaUser.hariPiket = "Selasa";
     piketSelasaUser.nama = "Guru Piket Selasa, S.Pd.";
-    changed = true;
-  }
-
-  const guruUser = users.find(u => u.email.toLowerCase() === "guru@smansaku.id");
-  if (!guruUser) {
-    users.push({ email: "guru@smansaku.id", password: "guru123", nama: "Guru Mata Pelajaran, S.Pd.", role: "guru" });
     changed = true;
   }
 
@@ -13603,6 +13592,12 @@ async function submitAddUser() {
     }
   }
 
+  try {
+    let delList = JSON.parse(localStorage.getItem("saku_guru_deleted_users") || "[]");
+    delList = delList.filter(em => em.toLowerCase() !== email);
+    localStorage.setItem("saku_guru_deleted_users", JSON.stringify(delList));
+  } catch(e) {}
+
   if (hariPiket) {
     savePiketAssignment(email, hariPiket);
   }
@@ -13905,11 +13900,23 @@ async function deleteUser(email) {
   }
 
   if (confirm(`Apakah Anda yakin ingin menghapus akun ${targetUser.nama} (${targetEmail})? Akun ini tidak akan dapat login lagi.`)) {
-    // Delete from Supabase cloud if available
+    // 1. Catat ke daftar akun terhapus agar tidak di-reseed otomatis
+    try {
+      const delList = JSON.parse(localStorage.getItem("saku_guru_deleted_users") || "[]");
+      if (!delList.includes(targetEmail)) {
+        delList.push(targetEmail);
+        localStorage.setItem("saku_guru_deleted_users", JSON.stringify(delList));
+      }
+    } catch(e) {}
+
+    // 2. Hapus dari Supabase cloud jika terhubung
     if (isCloudMode && supabase) {
       try {
-        // saku_guru_databases has ON DELETE CASCADE, so deleting user also deletes their database row
-        await supabase.from("saku_guru_users").delete().eq("email", targetEmail);
+        await supabase.from("saku_guru_databases").delete().eq("email", targetEmail);
+        const { error } = await supabase.from("saku_guru_users").delete().eq("email", targetEmail);
+        if (error) {
+          console.error("Supabase deleteUser error:", error);
+        }
       } catch(e) {
         console.error("Supabase deleteUser error:", e);
       }
@@ -13917,11 +13924,25 @@ async function deleteUser(email) {
 
     savePiketAssignment(targetEmail, "");
 
-    let updatedUsers = await getRegisteredUsers();
-    updatedUsers = updatedUsers.filter(u => u.email.toLowerCase() !== targetEmail);
+    // 3. Bersihkan dari penetapan wali kelas jika akun ini adalah wali kelas
+    let classChanged = false;
+    (db.kelas || []).forEach(k => {
+      if (k.waliKelasEmail && k.waliKelasEmail.toLowerCase() === targetEmail) {
+        k.waliKelasEmail = "";
+        k.waliKelas = "";
+        classChanged = true;
+      }
+    });
+    if (classChanged) {
+      await saveDatabase(true);
+      await distributeMasterClassesToAllTeachers(db.kelas, db.siswa);
+    }
+
+    // 4. Perbarui daftar akun lokal
+    let updatedUsers = (users || []).filter(u => u && u.email && u.email.toLowerCase() !== targetEmail);
     await saveRegisteredUsers(updatedUsers);
 
-    // Delete database key for this user
+    // 5. Hapus database lokal pengguna ini
     const dbKey = "saku_guru_db_" + targetEmail.replace(/[^a-z0-9]/g, "_");
     localStorage.removeItem(dbKey);
 
